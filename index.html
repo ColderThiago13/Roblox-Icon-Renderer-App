@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; connect-src 'self' blob: data:">
+  <title>Roblox Icon Renderer</title>
+  <link rel="stylesheet" href="src/ui/style.css">
+  <script type="importmap">
+    { "imports": {
+      "three": "./node_modules/three/build/three.module.js",
+      "three/addons/": "./node_modules/three/examples/jsm/",
+      "fzstd": "./node_modules/fzstd/esm/index.mjs"
+    } }
+  </script>
+</head>
+<body>
+  <div id="splash" aria-hidden="true">
+    <div class="sp-grid"></div>
+    <div class="sp-center">
+      <div class="sp-emblem">
+        <div class="sp-ring"></div>
+        <div class="sp-ring sp-ring2"></div>
+        <span class="sp-orbit"><i></i></span><span class="sp-orbit o2"><i></i></span><span class="sp-orbit o3"><i></i></span>
+        <img src="build/icon.png" alt="">
+      </div>
+      <h1 class="sp-title">Roblox Icon Renderer</h1>
+      <script>
+        requestAnimationFrame(() => { window.__splashStart = performance.now(); }); // animations begin on the first frame
+        { const t = document.currentScript.previousElementSibling, txt = t.textContent; t.textContent = '';
+          [...txt].forEach((ch, i) => { const s = document.createElement('span'); s.textContent = ch; s.style.animationDelay = (0.35 + i * 0.035) + 's'; t.append(s); }); }
+      </script>
+      <div class="sp-bar"><span></span></div>
+    </div>
+  </div>
+  <header class="toolbar">
+    <button id="addBtn" class="primary">Add files</button>
+    <input id="fileInput" type="file" multiple accept=".rbxm,.rbxmx,.obj" hidden>
+    <span class="sep"></span>
+    <label>Size <select id="expSize"><option>256</option><option selected>512</option><option>1024</option><option>2048</option><option>4096</option></select></label>
+    <label>Format <select id="expFormat"><option value="png">PNG</option><option value="webp">WebP</option><option value="jpeg">JPEG</option></select></label>
+    <label>Quality <select id="expSS"><option value="1">1x</option><option value="2" selected>2x SSAA</option></select></label>
+    <button id="exportOne">Export current…</button>
+    <button id="exportSel">Export checked…</button>
+    <button id="exportAll">Export all…</button>
+    <span class="sep"></span>
+    <span class="grow"></span>
+    <span id="status"></span>
+    <button id="updateBtn" class="update" hidden title="A newer version is available on GitHub"></button>
+    <button id="credsBtn">Roblox access…</button>
+  </header>
+
+  <main>
+    <aside id="files">
+      <div class="files-head">
+        <label title="Edits apply to every checked file"><input type="checkbox" id="linkEdits"> Edit checked together</label>
+        <span class="files-actions"><button id="checkAll" class="link">all</button>/<button id="checkNone" class="link">none</button></span>
+      </div>
+      <ul id="fileList"></ul>
+      <div id="emptyHint" class="hint">Drop <b>.rbxm</b>, <b>.rbxmx</b> or <b>.obj</b> files anywhere</div>
+    </aside>
+
+    <section id="stage">
+      <div id="viewport" class="bg-checker"><canvas id="view"></canvas></div>
+      <div id="timeline" hidden>
+        <button id="playBtn" class="chip" title="Play / pause VFX (Space)">▶</button>
+        <button id="restartBtn" class="chip" title="Back to start">⏮</button>
+        <input id="timeSlider" type="range" min="0" max="5" step="0.01" value="2" title="Time since the VFX started">
+        <span id="timeLabel">2.00 s</span>
+        <label class="muted">of <input id="timeMax" type="number" min="0.5" max="60" step="0.5" value="5"> s</label>
+        <label class="muted" title="Playback speed"><select id="playSpeed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label>
+      </div>
+      <div id="animbar" hidden>
+        <span class="muted">Animation</span>
+        <select id="animSelect" title="Animations found in the file, plus any IDs you add"></select>
+        <button id="animPlay" class="chip" title="Play / pause animation">▶</button>
+        <input id="animSlider" type="range" min="0" max="1" step="0.001" value="0" title="Animation time">
+        <span id="animLabel">0.00 / 0.00 s</span>
+        <input id="animId" type="text" placeholder="Animation ID or URL" size="18">
+        <button id="animAdd">Add</button>
+      </div>
+      <footer class="stage-foot">
+        <span>Preview bg:</span>
+        <button data-bg="checker" class="chip active">Checker</button>
+        <button data-bg="white" class="chip">White</button>
+        <button data-bg="black" class="chip">Black</button>
+        <span class="grow"></span>
+        <span class="tip">Drag: rotate · Right-drag: move · Wheel: zoom</span>
+        <button id="reloadBtn" title="Re-download assets and rebuild">Reload file</button>
+      </footer>
+      <details id="warnBox" hidden><summary id="warnSummary"></summary><ul id="warnList"></ul></details>
+    </section>
+
+    <aside id="panel">
+      <div id="panelHead">
+        <div class="ph-row">
+          <span class="ph-label">Profile</span>
+          <select id="profileSelect" title="Apply a saved profile to the current file (or all checked files with 'Edit checked together')"></select>
+          <button id="profileSave" title="Save the current settings as a named profile">Save…</button>
+          <button id="profileDelete" title="Delete the selected profile">✕</button>
+        </div>
+        <div class="ph-row">
+          <button id="copyBtn" title="Copy current settings">Copy</button>
+          <button id="pasteBtn" title="Paste settings onto current (or all linked) files">Paste</button>
+          <button id="applyAllBtn" title="Apply all current settings to every file">To all files</button>
+          <button id="resetBtn" title="Back to default settings">Reset</button>
+          <button id="defaultBtn" title="New files start with the current settings">Default</button>
+        </div>
+      </div>
+      <div id="sections"></div>
+    </aside>
+  </main>
+
+  <div id="dropOverlay" hidden>Drop files to add</div>
+
+  <dialog id="profileDlg">
+    <form method="dialog">
+      <h2>Save profile</h2>
+      <label>Name <input id="profileName" type="text" maxlength="60" autocomplete="off" required></label>
+      <p class="muted">Saves every setting of the current file (camera, lighting, VFX, effects, background). Using an existing name overwrites it.</p>
+      <div class="row"><span class="grow"></span><button value="cancel" formnovalidate>Cancel</button><button value="save" class="primary" id="profileOk">Save</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="credsDlg">
+    <form method="dialog">
+      <h2>Roblox asset access</h2>
+      <p>Meshes and textures referenced by your files (<code>rbxassetid://…</code>) are downloaded from Roblox, which requires authentication. Use either:</p>
+      <label>Open Cloud API key <small>(Creator Dashboard → API Keys, scope <code>legacy-asset:manage</code>)</small>
+        <input id="apiKey" type="password" autocomplete="off" placeholder="leave blank to keep current">
+      </label>
+      <label>.ROBLOSECURITY cookie <small>(fallback)</small>
+        <input id="cookie" type="password" autocomplete="off" placeholder="leave blank to keep current">
+      </label>
+      <p class="warn">The cookie grants full access to your Roblox account. It is stored encrypted on this computer and only sent to roblox.com. Prefer the API key, ideally from an alt/group account.</p>
+      <p id="credsState" class="muted"></p>
+      <div class="row">
+        <button value="clear" id="credsClear" type="button">Remove saved credentials</button>
+        <button id="cacheOpen" type="button">Open asset cache</button>
+        <button id="cacheClear" type="button">Clear asset cache</button>
+        <span class="grow"></span>
+        <button value="cancel">Close</button>
+        <button value="save" class="primary" id="credsSave">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="src/ui/app.js"></script>
+</body>
+</html>

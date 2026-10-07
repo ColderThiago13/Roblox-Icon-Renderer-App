@@ -1,0 +1,301 @@
+// One WebGL context shared by preview, thumbnails and export.
+// Pipeline: model pass -> silhouette copy -> ground+VFX pass -> highlight fills -> bloom -> grade (tone map, color,
+// overlay, stylize) -> JFA distance field -> outline/glow/drop shadow -> highlight outlines -> background/output.
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import * as S from './shaders.js';
+import { hexToVec3 } from '../settings.js';
+
+export const LAYER = { MODEL: 0, GROUND: 2, VFX: 3, HL_FILL: 4, HL_MASK: 5 };
+const deg = THREE.MathUtils.degToRad;
+const TONE = { none: 0, aces: 1, agx: 2, neutral: 3 };
+const angles = (yaw, pitch) => new THREE.Vector3(Math.sin(deg(yaw)) * Math.cos(deg(pitch)), Math.sin(deg(pitch)), -Math.cos(deg(yaw)) * Math.cos(deg(pitch)));
+
+// World-space sample points used for framing (subsampled for huge meshes).
+export function samplePoints(object, max = 40000) {
+  const meshes = [];
+  let total = 0;
+  object.updateMatrixWorld(true);
+  object.traverse((o) => {
+    if (!o.visible) return;
+    if (o.userData.particles) { meshes.push(o); total += o.userData.particles.length; }
+    else if (o.isMesh && o.geometry.attributes.position) { meshes.push(o); total += o.geometry.attributes.position.count; }
+  });
+  const stride = Math.max(1, Math.ceil(total / max)), out = [], v = new THREE.Vector3();
+  for (const m of meshes) {
+    if (m.userData.particles) { for (const p of m.userData.particles) out.push(p.pos.x, p.pos.y, p.pos.z); continue; }
+    const pos = m.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i += stride) { v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld); out.push(v.x, v.y, v.z); }
+  }
+  return new Float32Array(out);
+}
+
+function boundsOf(points) {
+  if (!points.length) return { center: new THREE.Vector3(), radius: 1, minY: 0 };
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  for (let i = 0; i < points.length; i += 3) box.expandByPoint(v.set(points[i], points[i + 1], points[i + 2]));
+  const center = box.getCenter(new THREE.Vector3());
+  let r2 = 0;
+  for (let i = 0; i < points.length; i += 3) r2 = Math.max(r2, center.distanceToSquared(v.set(points[i], points[i + 1], points[i + 2])));
+  return { center, radius: Math.max(Math.sqrt(r2), 1e-3), minY: box.min.y };
+}
+
+export class IconRenderer {
+  constructor(canvas) {
+    const gl = (this.gl = new THREE.WebGLRenderer({ canvas, alpha: true, premultipliedAlpha: true, antialias: false, preserveDrawingBuffer: true }));
+    gl.setPixelRatio(1);
+    gl.shadowMap.enabled = true;
+    gl.shadowMap.type = THREE.PCFShadowMap;
+    gl.toneMapping = THREE.NoToneMapping;
+    gl.setClearColor(0x000000, 0);
+    this.env = new THREE.PMREMGenerator(gl).fromScene(new RoomEnvironment(), 0.04).texture;
+    this.targets = {};
+    this.mats = {};
+    this.black = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1);
+    this.black.needsUpdate = true;
+
+    this.fsScene = new THREE.Scene();
+    this.fsCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this.fsMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2));
+    this.fsMesh.frustumCulled = false;
+    this.fsScene.add(this.fsMesh);
+
+    this.scene = new THREE.Scene();
+    this.scene.environment = this.env;
+    this.pcam = new THREE.PerspectiveCamera();
+    this.ocam = new THREE.OrthographicCamera();
+    this.hemi = new THREE.HemisphereLight(0xffffff, 0x50505a, 1);
+    this.key = new THREE.DirectionalLight();
+    this.key.castShadow = true;
+    this.key.shadow.mapSize.set(2048, 2048);
+    this.fill = new THREE.DirectionalLight();
+    this.rim = new THREE.DirectionalLight();
+    this.ground = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), new THREE.ShadowMaterial({ transparent: true }));
+    this.ground.receiveShadow = true;
+    this.ground.layers.set(LAYER.GROUND);
+    this.rig = [this.hemi, this.key, this.key.target, this.fill, this.fill.target, this.rim, this.rim.target, this.ground];
+    for (const o of this.rig) { if (o.isLight) o.layers.enableAll(); this.scene.add(o); }
+  }
+
+  rt(name, w, h, { type = THREE.HalfFloatType, samples = 0, depth = false, filter = THREE.LinearFilter } = {}) {
+    let t = this.targets[name];
+    if (t && (t.width !== w || t.height !== h)) { t.dispose(); t = null; }
+    if (!t) {
+      t = new THREE.WebGLRenderTarget(w, h, { type, samples, depthBuffer: depth, minFilter: filter, magFilter: filter });
+      this.targets[name] = t;
+    }
+    return t;
+  }
+
+  // All uniforms a shader uses must be passed on every call.
+  mat(name, fs, uniforms, extra = {}) {
+    let m = this.mats[name];
+    if (!m) m = this.mats[name] = new THREE.ShaderMaterial({ vertexShader: S.fsVS, fragmentShader: fs, uniforms: {}, depthTest: false, depthWrite: false, ...extra });
+    for (const [k, v] of Object.entries(uniforms)) { if (m.uniforms[k]) m.uniforms[k].value = v; else m.uniforms[k] = { value: v }; }
+    return m;
+  }
+
+  pass(material, target) {
+    this.fsMesh.material = material;
+    this.gl.setRenderTarget(target);
+    this.gl.render(this.fsScene, this.fsCam);
+  }
+
+  setupCamera(job, c) {
+    const points = c.fitVfx && job.vfxPoints?.length ? concat(job.points, job.vfxPoints) : job.points;
+    const { center, radius } = boundsOf(points);
+    const persp = c.projection !== 'orthographic';
+    const cam = persp ? this.pcam : this.ocam;
+    const dist = persp ? (radius / Math.sin(deg(c.fov) / 2)) * 1.1 : radius * 4;
+    cam.position.copy(center).addScaledVector(angles(c.yaw, c.pitch), dist);
+    cam.up.set(0, 1, 0);
+    cam.lookAt(center);
+    cam.rotateZ(deg(c.roll));
+    cam.near = Math.max(dist - radius * 3, dist * 0.005);
+    cam.far = dist + radius * 3;
+    if (persp) { cam.fov = c.fov; cam.aspect = 1; } else Object.assign(cam, { left: -radius, right: radius, top: radius, bottom: -radius });
+    cam.updateProjectionMatrix();
+    cam.updateMatrixWorld();
+
+    // Tight 2D fit: scale/shift clip space so the projected points fill the frame.
+    const vp = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    const v = new THREE.Vector3();
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (let i = 0; i < points.length; i += 3) {
+      v.set(points[i], points[i + 1], points[i + 2]).applyMatrix4(vp);
+      x0 = Math.min(x0, v.x); x1 = Math.max(x1, v.x); y0 = Math.min(y0, v.y); y1 = Math.max(y1, v.y);
+    }
+    if (!(x1 > x0)) { x0 = y0 = -1; x1 = y1 = 1; }
+    const s = ((1 - c.padding) / Math.max((x1 - x0) / 2, (y1 - y0) / 2, 1e-6)) * c.zoom;
+    const M = new THREE.Matrix4().set(s, 0, 0, -s * (x0 + x1) / 2 + c.offsetX * 2, 0, s, 0, -s * (y0 + y1) / 2 + c.offsetY * 2, 0, 0, 1, 0, 0, 0, 0, 1);
+    cam.projectionMatrix.premultiply(M);
+    cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert();
+    return { cam, center, radius, minY: boundsOf(job.points).minY };
+  }
+
+  setupScene(job, s, frame) {
+    const sc = this.scene;
+    for (const child of [...sc.children]) if (!this.rig.includes(child)) sc.remove(child);
+    sc.add(job.root);
+    if (job.vfxGroup && s.vfx.enabled) sc.add(job.vfxGroup);
+    if (job.hlGroup) sc.add(job.hlGroup);
+    sc.environmentIntensity = s.lighting.env;
+
+    const L = s.lighting, { center, radius } = frame;
+    for (const light of job.lights) {
+      if (!L.modelLights) continue;
+      light.intensity = light.userData.base * L.modelLightStrength;
+      light.castShadow = light.userData.shadows && s.shadows.selfShadows;
+      light.layers.enableAll();
+      sc.add(light);
+    }
+    job.root.traverse((o) => {
+      if (!o.isMesh) return;
+      o.receiveShadow = s.shadows.selfShadows;
+      if (o.material.userData?.neon) o.material.emissiveIntensity = L.neon;
+    });
+
+    const baseYaw = L.followCamera ? s.camera.yaw : 0;
+    const place = (light, yaw, pitch, intensity, color) => {
+      light.position.copy(center).addScaledVector(angles(yaw, pitch), radius * 4);
+      light.target.position.copy(center);
+      light.intensity = intensity;
+      light.color.set(color);
+    };
+    place(this.key, baseYaw + L.keyYaw, L.keyPitch, L.key, L.keyColor);
+    place(this.fill, baseYaw - L.keyYaw * 1.5, 10, L.fill, '#ffffff');
+    place(this.rim, baseYaw + 180, 35, L.rim, L.rimColor);
+    this.hemi.intensity = L.ambient;
+
+    const sh = this.key.shadow;
+    this.key.castShadow = s.shadows.selfShadows || s.shadows.ground;
+    Object.assign(sh.camera, { left: -radius * 1.3, right: radius * 1.3, top: radius * 1.3, bottom: -radius * 1.3, near: radius * 0.5, far: radius * 8 });
+    sh.camera.updateProjectionMatrix();
+    sh.radius = s.shadows.softness;
+    sh.blurSamples = 16;
+    sh.bias = -0.0005;
+    sh.normalBias = radius * 0.004;
+
+    this.ground.visible = s.shadows.ground;
+    this.ground.position.set(center.x, frame.minY - radius * 0.002, center.z);
+    this.ground.scale.setScalar(radius * 16);
+    this.ground.material.opacity = s.shadows.groundOpacity;
+  }
+
+  distanceField(maskTex, W, R) {
+    const res = new THREE.Vector2(W, W);
+    const opts = { type: THREE.FloatType, filter: THREE.NearestFilter };
+    let a = this.rt('jfaA', W, W, opts), b = this.rt('jfaB', W, W, opts);
+    this.pass(this.mat('jfaInit', S.jfaInitFS, { tMask: maskTex, res }), a);
+    const steps = [];
+    for (let st = 2 ** Math.ceil(Math.log2(Math.max(1, R))); st >= 1; st /= 2) steps.push(st);
+    steps.push(1);
+    for (const st of steps) {
+      this.pass(this.mat('jfaStep', S.jfaStepFS, { tSrc: a.texture, res, stepPx: st }), b);
+      [a, b] = [b, a];
+    }
+    const d = this.rt('dist', W, W);
+    this.pass(this.mat('jfaDist', S.jfaDistFS, { tSrc: a.texture, res }), d);
+    return d;
+  }
+
+  // size: output px. out: 'screen' or 'pixels'. Returns ImageData for 'pixels'.
+  render(job, s, size, { out = 'screen', supersample = 1 } = {}) {
+    const gl = this.gl;
+    const W = Math.round(size * supersample), px = W / 512;
+    const frame = this.setupCamera(job, s.camera);
+    const cam = frame.cam;
+    this.setupScene(job, s, frame);
+
+    // 1) model, 2) silhouette, 3) ground + VFX, 4) highlight fills
+    const sceneRT = this.rt('scene', W, W, { samples: 4, depth: true });
+    gl.setClearColor(0x000000, 0);
+    gl.setRenderTarget(sceneRT);
+    gl.clear();
+    cam.layers.set(LAYER.MODEL);
+    gl.render(this.scene, cam);
+    const maskRT = this.rt('mask', W, W, { type: THREE.UnsignedByteType });
+    this.pass(this.mat('copyAlpha', S.copyAlphaFS, { tSrc: sceneRT.texture }), maskRT);
+    // three picks shadow casters by the main camera's layers, so keep pass 1's shadow map (model as caster).
+    gl.autoClear = false;
+    gl.shadowMap.autoUpdate = false;
+    cam.layers.set(LAYER.GROUND); cam.layers.enable(LAYER.VFX); cam.layers.enable(LAYER.HL_FILL);
+    gl.setRenderTarget(sceneRT);
+    gl.render(this.scene, cam);
+    gl.shadowMap.autoUpdate = true;
+    gl.autoClear = true;
+
+    // bloom
+    let bloomTex = this.black;
+    if (s.bloom.enabled && s.bloom.strength > 0) {
+      const mips = [];
+      for (let i = 0, w = W >> 1; i < 6 && w >= 4; i++, w >>= 1) mips.push(this.rt('bloom' + i, w, w));
+      this.pass(this.mat('bloomPre', S.bloomPrefilterFS, { tSrc: sceneRT.texture, threshold: s.bloom.threshold, texel: new THREE.Vector2(1 / W, 1 / W) }), mips[0]);
+      for (let i = 1; i < mips.length; i++) this.pass(this.mat('down', S.downFS, { tSrc: mips[i - 1].texture, texel: new THREE.Vector2(1 / mips[i - 1].width, 1 / mips[i - 1].width) }), mips[i]);
+      gl.autoClear = false;
+      for (let i = mips.length - 1; i > 0; i--)
+        this.pass(this.mat('up', S.upFS, { tSrc: mips[i].texture, texel: new THREE.Vector2(0.5 / mips[i].width, 0.5 / mips[i].width), weight: 0.3 + s.bloom.radius }, { blending: THREE.AdditiveBlending }), mips[i - 1]);
+      gl.autoClear = true;
+      bloomTex = mips[0].texture;
+    }
+
+    const C = s.color, O = s.overlay, Z = s.stylize;
+    const a = this.rt('A', W, W), b = this.rt('B', W, W);
+    this.pass(this.mat('grade', S.gradeFS, {
+      tScene: sceneRT.texture, tBloom: bloomTex, texel: new THREE.Vector2(1 / W, 1 / W),
+      bloomStrength: s.bloom.enabled ? s.bloom.strength : 0, toneMode: TONE[s.lighting.toneMapping] ?? 3, exposure: s.lighting.exposure, toneMappingExposure: 1,
+      brightness: C.brightness, contrast: C.contrast, saturation: C.saturation, hue: deg(C.hue), gamma: C.gamma, temperature: C.temperature,
+      overlayMode: ['none', 'solid', 'gradient', 'rainbow'].indexOf(O.mode), overlayBlend: ['normal', 'multiply', 'screen', 'overlay', 'tint'].indexOf(O.blend),
+      ov1: new THREE.Vector3(...hexToVec3(O.color1)), ov2: new THREE.Vector3(...hexToVec3(O.color2)), ovAngle: deg(O.angle), ovStrength: O.strength,
+      chroma: Z.chroma * px, sharpen: Z.sharpen, posterize: Z.posterize, grain: Z.grain, vignette: Z.vignette, seed: s.vfx.seed,
+    }), a);
+    let cur = a, other = b;
+
+    const ol = s.outline, gw = s.glow, ds = s.dropShadow;
+    const outlineW = ol.enabled ? ol.thickness * px : 0, glowSize = gw.enabled ? gw.size * px : 0, blur = ds.enabled ? ds.blur * px : 0;
+    if (outlineW > 0 || glowSize > 0 || ds.enabled) {
+      const R = Math.min(256, Math.ceil(Math.max(outlineW, glowSize * 2.5, blur) + 2));
+      const dist = this.distanceField(s.vfx.outlineVfx ? cur.texture : maskRT.texture, W, R);
+      this.pass(this.mat('sil', S.silhouetteFS, {
+        tColor: cur.texture, tDist: dist.texture, texel: new THREE.Vector2(1 / W, 1 / W),
+        outlineW, outlineColor: new THREE.Vector3(...hexToVec3(ol.color)), outlineOpacity: ol.opacity,
+        glowSize, glowColor: new THREE.Vector3(...hexToVec3(gw.color)), glowIntensity: gw.enabled ? gw.intensity : 0,
+        shadowBlur: blur, shadowOffset: new THREE.Vector2(ds.offsetX * px, ds.offsetY * px), shadowColor: new THREE.Vector3(...hexToVec3(ds.color)), shadowOpacity: ds.enabled ? ds.opacity : 0,
+      }), other);
+      [cur, other] = [other, cur];
+    }
+
+    // Highlight outlines (one mask + distance field per Highlight)
+    for (const hl of job.highlights || []) {
+      if (hl.outlineOpacity <= 0) continue;
+      for (const h of job.highlights) h.maskGroup.visible = h === hl;
+      const hm = this.rt('hlMask', W, W, { type: THREE.UnsignedByteType, depth: true });
+      cam.layers.set(LAYER.HL_MASK);
+      gl.setRenderTarget(hm); gl.clear(); gl.render(this.scene, cam);
+      const width = 2.5 * px;
+      const dist = this.distanceField(hm.texture, W, Math.ceil(width + 2));
+      this.pass(this.mat('hlOutline', S.hlOutlineFS, { tColor: cur.texture, tDist: dist.texture, width, color: srgbVec(hl.outlineColor), opacity: hl.outlineOpacity }), other);
+      [cur, other] = [other, cur];
+    }
+
+    const B = s.background;
+    const finalU = (straight) => ({ tColor: cur.texture, bgMode: ['transparent', 'solid', 'linear', 'radial'].indexOf(B.mode), bg1: new THREE.Vector3(...hexToVec3(B.color1)), bg2: new THREE.Vector3(...hexToVec3(B.color2)), bgAngle: deg(B.angle), straight,
+      // level N = (N + 1)-px blocks at 512, scaled with the output size; as a fraction of the frame
+      pixelBlock: Z.pixelate > 0 ? (Z.pixelate + 1) / 512 : 0 });
+    if (out === 'screen') {
+      this.pass(this.mat('final', S.finalFS, finalU(false)), null);
+      return null;
+    }
+    const outRT = this.rt('out', size, size, { type: THREE.UnsignedByteType });
+    this.pass(this.mat('final', S.finalFS, finalU(true)), outRT);
+    const buf = new Uint8Array(size * size * 4);
+    gl.readRenderTargetPixels(outRT, 0, 0, size, size, buf);
+    const img = new ImageData(size, size), row = size * 4;
+    for (let y = 0; y < size; y++) img.data.set(buf.subarray((size - 1 - y) * row, (size - y) * row), y * row);
+    return img;
+  }
+}
+
+function srgbVec(color) { const t = {}; color.getRGB(t, THREE.SRGBColorSpace); return new THREE.Vector3(t.r, t.g, t.b); }
+function concat(a, b) { const o = new Float32Array(a.length + b.length); o.set(a); o.set(b, a.length); return o; }

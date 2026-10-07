@@ -1,0 +1,134 @@
+<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="4">
+	<Item class="Model" referent="RBX0">
+		<Properties><string name="Name">Showcase</string></Properties>
+		<Item class="Part" referent="RBX1">
+			<Properties>
+				<string name="Name">Base</string>
+				<CoordinateFrame name="CFrame"><X>0</X><Y>0.5</Y><Z>0</Z><R00>1</R00><R01>0</R01><R02>0</R02><R10>0</R10><R11>1</R11><R12>0</R12><R20>0</R20><R21>0</R21><R22>1</R22></CoordinateFrame>
+				<Vector3 name="size"><X>8</X><Y>1</Y><Z>8</Z></Vector3>
+				<Color3uint8 name="Color3uint8">4283782485</Color3uint8>
+				<token name="Material">272</token>
+			</Properties>
+		</Item>
+		<Item class="Part" referent="RBX2">
+			<Properties>
+				<string name="Name">Ball</string>
+				<CoordinateFrame name="CFrame"><X>-2</X><Y>2.5</Y><Z>-2</Z><R00>1</R00><R01>0</R01><R02>0</R02><R10>0</R10><R11>1</R11><R12>0</R12><R20>0</R20><R21>0</R21><R22>1</R22></CoordinateFrame>
+				<Vector3 name="size"><X>3</X><Y>3</Y><Z>3</Z></Vector3>
+				<Color3uint8 name="Color3uint8">4294923605</Color3uint8>
+				<token name="Material">1088</token>
+				<token name="shape">0</token>
+			</Properties>
+			<Item class="Highlight" referent="RBX20">
+				<Properties>
+					<Color3 name="FillColor"><R>1</R><G>0.8</G><B>0.2</B></Color3>
+					<float name="FillTransparency">0.8</float>
+					<Color3 name="OutlineColor"><R>1</R><G>1</G><B>0.4</B></Color3>
+					<float name="OutlineTransparency">0</float>
+					<token name="DepthMode">0</token>
+				</Properties>
+			</Item>
+		</Item>
+		<Item class="Part" referent="RBX3">
+			<Properties>
+				<string name="Name">NeonCylinder</string>
+				<CoordinateFrame name="CFrame"><X>2</X><Y>3</Y><Z>-2</Z><R00>0</R00><R01>-1</R01><R02>0</R02><R10>1</R10><R11>0</R11><R12>0</R12><R20>0</R20><R21>0</R21><R22>1</R22></CoordinateFrame>
+				<Vector3 name="size"><X>4</X><Y>2</Y><Z>2</Z></Vector3>
+				<Color3uint8 name="Color3uint8">4278255615</Color3uint8>
+				<token name="Material">288</token>
+				<token name="shape">2</token>
+			</Properties>
+			<Item class="PointLight" referent="RBX30">
+				<Properties>
+					<Color3 name="Color"><R>0</R><G>1</G><B>1</B></Color3>
+					<float name="Brightness">2</float>
+					<float name="Range">10</float>
+				</Properties>
+			</Item>
+		</Item>
+		<Item class="WedgePart" referent="RBX4">
+			<Properties>
+				<string name="Name">Wedge</string>
+				<CoordinateFrame name="CFrame"><X>-2</X><Y>2</Y><Z>2</Z><R00>1</R00><R01>0</R01><R02>0</R02><R10>0</R10><R11>1</R11><R12>0</R12><R20>0</R20><R21>0</R21><R22>1</R22></CoordinateFrame>
+				<Vector3 name="size"><X>3</X><Y>2</Y><Z>3</Z></Vector3>
+				<Color3uint8 name="Color3uint8">4285098345</Color3uint8>
+				<token name="Material">256</token>
+			</Properties>
+		</Item>
+		<Item class="Part" referent="RBX5">
+			<Properties>
+				<string name="Name">Glass</string>
+				<CoordinateFrame name="CFrame"><X>2</X><Y>2</Y><Z>2</Z><R00>0.7071</R00><R01>0</R01><R02>0.7071</R02><R10>0</R10><R11>1</R11><R12>0</R12><R20>-0.7071</R20><R21>0</R21><R22>0.7071</R22></CoordinateFrame>
+				<Vector3 name="size"><X>2</X><Y>2</Y><Z>2</Z></Vector3>
+				<Color3uint8 name="Color3uint8">4288269567</Color3uint8>
+				<token name="Material">1568</token>
+				<float name="Transparency">0.4</float>
+			</Properties>
+			<Item class="Sparkles" referent="RBX50"><Properties><Color3 name="SparkleColor"><R>0.6</R><G>0.8</G><B>1</B></Color3></Properties></Item>
+		</Item>
+		<Item class="Part" referent="RBX6">
+			<Properties>
+				<string name="Name">Emitter</string>
+				<CoordinateFrame name="CFrame"><X>0</X><Y>5</Y><Z>0</Z><R00>1</R00><R01>0</R01><R02>0</R02><R10>0</R10><R11>1</R11><R12>0</R12><R20>0</R20><R21>0</R21><R22>1</R22></CoordinateFrame>
+				<Vector3 name="size"><X>1</X><Y>1</Y><Z>1</Z></Vector3>
+				<float name="Transparency">1</float>
+			</Properties>
+			<Item class="ParticleEmitter" referent="RBX60">
+				<Properties>
+					<string name="Name">Stars</string>
+					<Vector3 name="Acceleration"><X>0</X><Y>-4</Y><Z>0</Z></Vector3>
+					<ColorSequence name="Color">0 1 0.8 0.2 0 1 1 0.2 0.5 0 </ColorSequence>
+					<NumberRange name="Lifetime">1 2 </NumberRange>
+					<float name="LightEmission">1</float>
+					<float name="Rate">40</float>
+					<NumberRange name="Speed">4 7 </NumberRange>
+					<Vector2 name="SpreadAngle"><X>35</X><Y>35</Y></Vector2>
+					<NumberSequence name="Size">0 0.6 0.1 1 0 0 </NumberSequence>
+					<NumberSequence name="Transparency">0 0 0 1 1 0 </NumberSequence>
+					<NumberRange name="RotSpeed">-90 90 </NumberRange>
+					<Content name="Texture"><url>rbxasset://textures/particles/sparkles_main.dds</url></Content>
+				</Properties>
+			</Item>
+		</Item>
+		<Item class="Part" referent="RBX7">
+			<Properties>
+				<string name="Name">BeamPost</string>
+				<CoordinateFrame name="CFrame"><X>-3.5</X><Y>2</Y><Z>3.5</Z><R00>1</R00><R01>0</R01><R02>0</R02><R10>0</R10><R11>1</R11><R12>0</R12><R20>0</R20><R21>0</R21><R22>1</R22></CoordinateFrame>
+				<Vector3 name="size"><X>0.5</X><Y>2</Y><Z>0.5</Z></Vector3>
+				<Color3uint8 name="Color3uint8">4280295456</Color3uint8>
+			</Properties>
+			<Item class="Attachment" referent="RBX70">
+				<Properties><CoordinateFrame name="CFrame"><X>0</X><Y>1</Y><Z>0</Z><R00>1</R00><R01>0</R01><R02>0</R02><R10>0</R10><R11>1</R11><R12>0</R12><R20>0</R20><R21>0</R21><R22>1</R22></CoordinateFrame></Properties>
+			</Item>
+			<Item class="Attachment" referent="RBX71">
+				<Properties><CoordinateFrame name="CFrame"><X>7</X><Y>1</Y><Z>-7</Z><R00>1</R00><R01>0</R01><R02>0</R02><R10>0</R10><R11>1</R11><R12>0</R12><R20>0</R20><R21>0</R21><R22>1</R22></CoordinateFrame></Properties>
+			</Item>
+			<Item class="Beam" referent="RBX72">
+				<Properties>
+					<Ref name="Attachment0">RBX70</Ref>
+					<Ref name="Attachment1">RBX71</Ref>
+					<ColorSequence name="Color">0 1 0.2 0.6 0 1 0.3 0.4 1 0 </ColorSequence>
+					<NumberSequence name="Transparency">0 0.6 0 0.5 0 0 1 0.6 0 </NumberSequence>
+					<float name="CurveSize0">4</float>
+					<float name="CurveSize1">-4</float>
+					<float name="Width0">0.6</float>
+					<float name="Width1">0.6</float>
+					<float name="LightEmission">1</float>
+					<bool name="FaceCamera">true</bool>
+					<int name="Segments">30</int>
+				</Properties>
+			</Item>
+		</Item>
+		<Item class="Part" referent="RBX8">
+			<Properties>
+				<string name="Name">Torch</string>
+				<CoordinateFrame name="CFrame"><X>3.5</X><Y>1.5</Y><Z>3.5</Z><R00>1</R00><R01>0</R01><R02>0</R02><R10>0</R10><R11>1</R11><R12>0</R12><R20>0</R20><R21>0</R21><R22>1</R22></CoordinateFrame>
+				<Vector3 name="size"><X>0.6</X><Y>1</Y><Z>0.6</Z></Vector3>
+				<Color3uint8 name="Color3uint8">4285085443</Color3uint8>
+				<token name="Material">512</token>
+			</Properties>
+			<Item class="Fire" referent="RBX80"><Properties><float name="size_xml">2</float><float name="heat_xml">6</float></Properties></Item>
+			<Item class="Smoke" referent="RBX81"><Properties><float name="size_xml">0.6</float><float name="risevelocity_xml">2</float><float name="opacity_xml">0.15</float></Properties></Item>
+		</Item>
+	</Item>
+</roblox>

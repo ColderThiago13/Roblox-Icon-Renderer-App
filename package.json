@@ -1,0 +1,68 @@
+{
+  "name": "roblox-icon-renderer",
+  "version": "0.5.0",
+  "description": "Desktop icon renderer for Roblox .rbxm/.rbxmx/.obj files with post-processing and VFX",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "start": "electron .",
+    "test": "node test/parsers.test.js && node test/anim.test.js",
+    "dist": "electron-builder --win",
+    "pack": "electron-builder --dir",
+    "release": "electron-builder --win --publish always"
+  },
+  "build": {
+    "appId": "com.roblox-icon-renderer.app",
+    "productName": "Roblox Icon Renderer",
+    "asar": false,
+    "files": [
+      "main.js",
+      "preload.cjs",
+      "index.html",
+      "src/**/*",
+      "build/icon.png",
+      "node_modules/three/package.json",
+      "node_modules/three/build/**/*",
+      "node_modules/fzstd/**/*",
+      {
+        "from": "node_modules/three/examples/jsm",
+        "to": "node_modules/three/examples/jsm",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "icon": "build/icon.png",
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Roblox Icon Renderer"
+    },
+    "artifactName": "Roblox-Icon-Renderer-Setup.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ColderThiago13",
+        "repo": "Roblox-Icon-Renderer-App",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "license": "MIT",
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "fzstd": "^0.1.1",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "electron": "^44.6.0",
+    "electron-builder": "^26.15.3"
+  },
+  "author": "ColderThiago13"
+}
