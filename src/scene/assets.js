@@ -9,6 +9,16 @@ const meshCache = new Map();
 const draco = new DRACOLoader().setDecoderPath('node_modules/three/examples/jsm/libs/draco/');
 
 export function getAssetBytes(url) {
+  const local = String(url ?? '').match(/^\s*rbxasset:\/\/(.+?)\s*$/i)?.[1];
+  if (local) {
+    if (!bytesCache.has(url)) {
+      const p = (globalThis.native?.getRbxAsset?.(local) ?? Promise.reject(new Error('rbxasset:// is unavailable')))
+        .then((b) => new Uint8Array(b), (e) => { throw new Error(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); });
+      p.catch(() => bytesCache.delete(url));
+      bytesCache.set(url, p);
+    }
+    return bytesCache.get(url);
+  }
   const id = assetId(url);
   if (!id) return Promise.reject(new Error(`Unsupported content URL "${url}"`));
   if (!bytesCache.has(id)) {
@@ -26,12 +36,14 @@ export function clearMemoryCache() { bytesCache.clear(); imageCache.clear(); mes
 // -> HTMLImageElement (decoded) or rejects
 export function loadImage(url) {
   if (!imageCache.has(url)) {
-    imageCache.set(url, getAssetBytes(url).then(async (bytes) => {
+    const pending = getAssetBytes(url).then(async (bytes) => {
       const img = new Image();
       img.src = URL.createObjectURL(new Blob([bytes]));
-      await img.decode();
+      try { await img.decode(); } finally { URL.revokeObjectURL(img.src); }
       return img;
-    }));
+    });
+    pending.catch(() => imageCache.delete(url));
+    imageCache.set(url, pending);
   }
   return imageCache.get(url);
 }

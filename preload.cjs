@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('native', {
   getAsset: (id) => ipcRenderer.invoke('asset:get', id),
+  getRbxAsset: (rel) => ipcRenderer.invoke('rbxasset:get', rel),
+  listRbxAssets: (rel) => ipcRenderer.invoke('rbxasset:list', rel),
   getConfig: () => ipcRenderer.invoke('config:get'),
   setConfig: (patch) => ipcRenderer.invoke('config:set', patch),
   getProfiles: () => ipcRenderer.invoke('profiles:get'),

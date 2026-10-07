@@ -2,6 +2,8 @@
 import * as THREE from 'three';
 import { loadMesh, loadTexture, loadOverlayTexture } from './assets.js';
 import { walk, nameOf } from '../rbx/instance.js';
+import { brickColor } from '../rbx/brickcolor.js';
+import { collectAppearances, applyAppearance, classicLimbUrl, chamferedLimb } from './appearance.js';
 
 const PART_CLASSES = new Set(['Part', 'MeshPart', 'WedgePart', 'CornerWedgePart', 'TrussPart', 'SpawnLocation', 'Seat', 'VehicleSeat', 'SkateboardPlatform', 'PartOperation', 'UnionOperation', 'NegateOperation', 'IntersectOperation', 'FlagStand']);
 export const isPart = (inst) => PART_CLASSES.has(inst.className);
@@ -21,7 +23,7 @@ export const color3 = (c, fallback = 0xa3a2a5) =>
   c ? new THREE.Color().setRGB(c.r, c.g, c.b, THREE.SRGBColorSpace) : new THREE.Color(fallback);
 
 export function partColor(inst) {
-  return color3(inst.props.color3uint8 || inst.props.color);
+  return color3(inst.props.color3uint8 || inst.props.color || brickColor(inst.props.brickcolor));
 }
 
 // World matrix of a part or attachment/bone (attachments are relative to their parent part, or to the
@@ -47,6 +49,14 @@ const unitBox = new THREE.BoxGeometry(1, 1, 1);
 const unitSphere = new THREE.SphereGeometry(0.5, 48, 24);
 const unitCylinderY = new THREE.CylinderGeometry(0.5, 0.5, 1, 48);
 const unitCylinderX = unitCylinderY.clone().rotateZ(Math.PI / 2);
+// Classic head (SpecialMesh MeshType.Head): upright cylinder with rounded rims.
+const unitHead = (() => {
+  const rc = 0.2, pts = [new THREE.Vector2(0, -0.5)];
+  for (let i = 0; i <= 8; i++) { const a = -Math.PI / 2 + (i / 8) * Math.PI / 2; pts.push(new THREE.Vector2(0.5 - rc + Math.cos(a) * rc, -0.5 + rc + Math.sin(a) * rc)); }
+  for (let i = 0; i <= 8; i++) { const a = (i / 8) * Math.PI / 2; pts.push(new THREE.Vector2(0.5 - rc + Math.cos(a) * rc, 0.5 - rc + Math.sin(a) * rc)); }
+  pts.push(new THREE.Vector2(0, 0.5));
+  return new THREE.LatheGeometry(pts, 48);
+})();
 
 function polyGeometry(verts, faces) {
   const pos = [];
@@ -147,13 +157,40 @@ const FACES = [
   { axis: 'z', sign: -1, rot: [0, Math.PI, 0], w: 'x', h: 'y' },
 ];
 
-async function buildDecal(dec, size, warn) {
+// Decal on a mesh: Roblox projects it along the face normal onto the mesh surfaces facing that way,
+// spanning the mesh bounds (so a face decal lands on a round head, not on the hidden part box).
+export function projectedDecalGeometry(mesh, f) {
+  mesh.updateMatrix();
+  const src = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry;
+  const pos = src.attributes.position, n = new THREE.Vector3();
+  n[f.axis] = f.sign;
+  const rot = new THREE.Quaternion().setFromEuler(new THREE.Euler(...f.rot));
+  const uDir = new THREE.Vector3(1, 0, 0).applyQuaternion(rot), vDir = new THREE.Vector3(0, 1, 0).applyQuaternion(rot);
+  const pts = [];
+  for (let i = 0; i < pos.count; i++) pts.push(new THREE.Vector3().fromBufferAttribute(pos, i).applyMatrix4(mesh.matrix));
+  const span = (dir) => { let lo = Infinity, hi = -Infinity; for (const p of pts) { const d = p.dot(dir); lo = Math.min(lo, d); hi = Math.max(hi, d); } return [lo, hi - lo || 1]; };
+  const [u0, uw] = span(uDir), [v0, vh] = span(vDir);
+  const out = [], uv = [], e1 = new THREE.Vector3(), e2 = new THREE.Vector3();
+  for (let i = 0; i + 2 < pts.length; i += 3) {
+    const [a, b, c] = [pts[i], pts[i + 1], pts[i + 2]];
+    if (e1.subVectors(b, a).cross(e2.subVectors(c, a)).normalize().dot(n) <= 0.05) continue;
+    for (const p of [a, b, c]) { out.push(p.x, p.y, p.z); uv.push((p.dot(uDir) - u0) / uw, (p.dot(vDir) - v0) / vh); }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(out, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.computeVertexNormals();
+  return { geometry: g, w: uw, h: vh };
+}
+
+async function buildDecal(dec, size, warn, target) {
   const url = dec.props.texture || dec.props.colormapcontent;
   if (!url) return null;
   let tex;
   try { tex = await loadTexture(url); } catch (e) { warn(`${nameOf(dec)}: ${e.message}`); return null; }
   const f = FACES[dec.props.face ?? 5] || FACES[5];
-  const w = size[f.w], h = size[f.h];
+  const projected = target && target.geometry !== unitBox ? projectedDecalGeometry(target, f) : null;
+  const w = projected?.w ?? size[f.w], h = projected?.h ?? size[f.h];
   const transparency = dec.props.transparency ?? 0;
   if (dec.className === 'Texture') {
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
@@ -165,9 +202,11 @@ async function buildDecal(dec, size, warn) {
     map: tex, color: color3(dec.props.color3, 0xffffff), transparent: true, opacity: 1 - transparency,
     roughness: 0.7, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
   });
-  const plane = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
-  plane.rotation.set(...f.rot);
-  plane.position[f.axis] = f.sign * (size[f.axis] / 2 + 0.002);
+  const plane = new THREE.Mesh(projected?.geometry ?? new THREE.PlaneGeometry(w, h), mat);
+  if (!projected) {
+    plane.rotation.set(...f.rot);
+    plane.position[f.axis] = f.sign * (size[f.axis] / 2 + 0.002);
+  }
   plane.renderOrder = 1 + (dec.props.zindex ?? 1);
   return plane;
 }
@@ -181,14 +220,35 @@ async function buildPart(inst, ctx) {
   group.matrix.copy(cframeMatrix(inst.props.cframe));
 
   const transparency = inst.props.transparency ?? 0;
-  const col = partColor(inst);
+  const appearance = ctx.appearances.get(inst);
+  const col = appearance?.color ? color3(appearance.color) : partColor(inst);
   const material = makeMaterial(inst, col);
   const kids = inst.children;
   const special = kids.find((c) => c.className === 'SpecialMesh' || c.className === 'BlockMesh' || c.className === 'CylinderMesh');
   const sa = kids.find((c) => c.className === 'SurfaceAppearance');
 
   let mesh;
-  if (inst.className === 'MeshPart' && (inst.props.meshid || inst.props.meshcontent)) {
+  const cm = appearance?.characterMesh?.props;
+  const characterMeshUrl = cm?.meshcontent || (cm?.meshid ? String(cm.meshid) : null);
+  if (appearance?.classic) {
+    let geo;
+    try { geo = await loadMesh(classicLimbUrl(group.name)); }
+    catch (e) { ctx.warn(`Classic R6 body: ${e.message}; using an approximation`); geo = chamferedLimb(group.name); }
+    geo.computeBoundingBox();
+    const ext = geo.boundingBox.getSize(new THREE.Vector3());
+    mesh = new THREE.Mesh(geo, material);
+    mesh.scale.set(size.x / ext.x, size.y / ext.y, size.z / ext.z);
+    mesh.userData.classicUv = !geo.userData.approx;
+  } else if (characterMeshUrl) {
+    try {
+      const geo = await loadMesh(characterMeshUrl);
+      geo.computeBoundingBox();
+      const extent = geo.boundingBox.getSize(new THREE.Vector3()), center = geo.boundingBox.getCenter(new THREE.Vector3());
+      mesh = new THREE.Mesh(geo, material);
+      mesh.scale.set(size.x / (extent.x || 1), size.y / (extent.y || 1), size.z / (extent.z || 1));
+      mesh.position.copy(center.multiply(mesh.scale).negate());
+    } catch (e) { ctx.warn(`${group.name}: ${e.message}`); mesh = new THREE.Mesh(unitBox, material); mesh.scale.copy(size); }
+  } else if (inst.className === 'MeshPart' && (inst.props.meshid || inst.props.meshcontent)) {
     const url = inst.props.meshid || inst.props.meshcontent;
     try {
       const geo = await loadMesh(url);
@@ -215,14 +275,25 @@ async function buildPart(inst, ctx) {
     let geo = unitBox, geoScale = size.clone().multiply(scale);
     if (type === 5) {
       try { geo = await loadMesh(p.meshid); geoScale = scale; } catch (e) { ctx.warn(`${group.name}: ${e.message}`); }
+    } else if (type === 0) {
+      // Head keeps a round cross-section: a default 2x1x1 head is a 1.25-stud cylinder, not an oval.
+      // Roblox's own head mesh when installed, else a close stand-in.
+      const d = Math.min(size.x, size.z);
+      geo = await loadMesh('rbxasset://avatar/heads/head.mesh').catch(() => unitHead);
+      geo.computeBoundingBox();
+      const ext = geo.boundingBox.getSize(new THREE.Vector3());
+      geoScale = new THREE.Vector3(d / ext.x, size.y / ext.y, d / ext.z).multiply(scale);
     } else if (type === 3) geo = unitSphere;
-    else if (type === 4 || type === 0) geo = unitCylinderY;
+    else if (type === 4) geo = unitCylinderY;
     else if (type === 2) geo = unitWedge;
+    else if (type === 11) geo = unitCornerWedge;
     mesh = new THREE.Mesh(geo, material);
     mesh.scale.copy(geoScale);
     mesh.position.copy(offset);
     if (p.textureid) {
-      try { material.map = await loadTexture(p.textureid); material.color.copy(color3(p.vertexcolor, 0xffffff)); material.needsUpdate = true; }
+      // VertexColor is a Vector3 tint, not a Color3.
+      const vc = p.vertexcolor && { r: p.vertexcolor.x, g: p.vertexcolor.y, b: p.vertexcolor.z };
+      try { material.map = await loadTexture(p.textureid); material.color.copy(color3(vc, 0xffffff)); material.needsUpdate = true; }
       catch (e) { ctx.warn(`${group.name}: ${e.message}`); }
     }
   } else {
@@ -232,14 +303,20 @@ async function buildPart(inst, ctx) {
     mesh.scale.copy(s);
   }
 
+  const base = cm?.basetexturecontent || (cm?.basetextureid ? String(cm.basetextureid) : null);
+  if (base) {
+    try { material.map = await loadOverlayTexture(base, col); material.color.set(0xffffff); }
+    catch (e) { ctx.warn(`${group.name}: ${e.message}`); }
+  }
   if (sa) await applySurfaceAppearance(material, sa, col, ctx.warn);
+  await applyAppearance(mesh, appearance, ctx.warn);
   if (transparency >= 1) mesh.visible = false;
   mesh.castShadow = mesh.receiveShadow = true;
   mesh.userData.inst = inst;
   group.add(mesh);
 
   for (const dec of kids.filter((c) => c.className === 'Decal' || c.className === 'Texture')) {
-    const plane = await buildDecal(dec, size, ctx.warn);
+    const plane = await buildDecal(dec, size, ctx.warn, mesh);
     if (plane) group.add(plane);
   }
   ctx.partObjects.set(inst, group);
@@ -249,23 +326,24 @@ async function buildPart(inst, ctx) {
 // ---------- entry ----------
 export async function buildScene(tree, warn) {
   const root = new THREE.Group();
-  const ctx = { warn, partObjects: new Map(), skinned: [] };
-  const vfx = [], lights = [], highlights = [];
+  const ctx = { warn, partObjects: new Map(), skinned: [], appearances: collectAppearances(tree) };
+  const vfx = [], trails = [], lights = [], highlights = [];
   const jobs = [];
 
   for (const inst of walk(tree.roots)) {
     const cls = inst.className;
     if (isPart(inst)) jobs.push(buildPart(inst, ctx).then((g) => root.add(g)));
     else if (cls === 'ParticleEmitter' || cls === 'Beam' || cls === 'Trail' || cls === 'Fire' || cls === 'Smoke' || cls === 'Sparkles') {
-      if (cls === 'Trail') warn(`${nameOf(inst)}: Trails need motion and are skipped`);
+      if (cls === 'Trail') trails.push(inst);
       else vfx.push(inst);
     } else if (cls === 'PointLight' || cls === 'SpotLight' || cls === 'SurfaceLight') lights.push(inst);
     else if (cls === 'Highlight') highlights.push(inst);
+    else if (cls === 'WrapLayer') warn(`${nameOf(inst)}: layered clothing cage deformation is not supported; rendering the saved mesh`);
   }
   await Promise.all(jobs);
   root.updateMatrixWorld(true);
-    const hls = highlights.map((h) => resolveHighlight(h, ctx)).filter(Boolean);
-  return { root, vfx, lights: lights.map(buildLight).filter(Boolean), highlights: hls, hlGroup: highlightGroup(hls), partObjects: ctx.partObjects, skinned: ctx.skinned };
+  const hls = highlights.map((h) => resolveHighlight(h, ctx)).filter(Boolean);
+  return { root, vfx, trails, lights: lights.map(buildLight).filter(Boolean), highlights: hls, hlGroup: highlightGroup(hls), partObjects: ctx.partObjects, skinned: ctx.skinned };
 }
 
 const NORMALS = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [-1, 0, 0], [0, -1, 0], [0, 0, -1]];

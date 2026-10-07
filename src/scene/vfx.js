@@ -50,6 +50,9 @@ function evalColorSeq(seq, t) {
 const numSeq = (v) => (typeof v === 'number' ? [{ t: 0, v, e: 0 }, { t: 1, v, e: 0 }] : v);
 const colSeq = (c) => (Array.isArray(c) ? c : [{ t: 0, c }, { t: 1, c }]);
 
+// Shared ribbon shading and sequence sampling for Trails.
+export { evalNumSeq, evalColorSeq, numSeq, colSeq, vfxMaterial, beamVS, beamFS, inPart };
+
 // ---------- procedural stand-ins for built-in rbxasset:// textures ----------
 const procCache = new Map();
 function procTexture(kind) {
@@ -345,7 +348,10 @@ varying vec2 vUv; varying vec4 vColor;
 void main() {
   vUv = vec2(uv.x, 1.0 - (along - scroll)); vColor = color4;
   vec3 dir = fixedDir;
-  if (faceCamera) dir = normalize(cross(tangent3, cameraPosition - position));
+  if (faceCamera) {
+    vec3 facing = cross(tangent3, cameraPosition - position);
+    if (dot(facing, facing) > 1e-8) dir = normalize(facing);
+  }
   vec3 center = (viewMatrix * vec4(position, 1.0)).xyz;
   vec3 off = (viewMatrix * vec4(dir * side * width * 0.5, 0.0)).xyz;
   float d = length(center);

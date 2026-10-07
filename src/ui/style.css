@@ -38,7 +38,7 @@ main { display: grid; grid-template-columns: 240px 1fr 320px; height: calc(100% 
 .hint { color: var(--muted); text-align: center; padding: 30px 16px; }
 
 #stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
-#viewport { flex: 1; display: grid; place-items: center; min-height: 0; overflow: hidden; }
+#viewport { flex: 1; display: grid; place-items: center; min-height: 0; overflow: hidden; position: relative; }
 #view { border-radius: 4px; box-shadow: 0 0 0 1px var(--line); touch-action: none; }
 .bg-checker #view { background: repeating-conic-gradient(#3a3c45 0 25%, #2c2e36 0 50%) 0 0 / 20px 20px; }
 .bg-white #view { background: #fff; }
@@ -135,3 +135,29 @@ button.update { background: linear-gradient(90deg, #2f9e5b, #3fbf76); border-col
 button.update[hidden] { display: none; }
 button.update:disabled { animation: none; opacity: .85; cursor: progress; }
 @keyframes upd-pulse { 50% { box-shadow: 0 0 0 4px rgba(63, 191, 118, .25); } }
+dialog .grid2 { display: grid; grid-template-columns: 1fr 1fr; column-gap: 14px; }
+dialog .grid2 label { margin: 6px 0; }
+dialog label.inline { flex-direction: row; align-items: center; }
+#animDlg:not([data-format="gif"]) .gifOnly, #animDlg:not([data-format="sheet"]) .sheetOnly { display: none; }
+#axProgressRow { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+#axProgressRow[hidden] { display: none; }
+#axProgress { flex: 1; }
+/* text layers */
+#textSel { position: absolute; transform-origin: 0 0; outline: 1px dashed rgba(255,255,255,.9); box-shadow: 0 0 0 1px rgba(0,0,0,.6); pointer-events: none; }
+#textSel[hidden] { display: none; }
+#textSel i { position: absolute; width: 10px; height: 10px; background: #fff; border: 1px solid #222; border-radius: 2px; pointer-events: auto; cursor: nwse-resize; touch-action: none; }
+#textSel .nw { left: -6px; top: -6px; } #textSel .ne { right: -6px; top: -6px; cursor: nesw-resize; }
+#textSel .sw { left: -6px; bottom: -6px; cursor: nesw-resize; } #textSel .se { right: -6px; bottom: -6px; }
+#textSel .rot { left: calc(50% - 6px); top: -28px; width: 12px; height: 12px; border-radius: 50%; cursor: grab; background: var(--accent); }
+#textSel .rot::after { content: ""; position: absolute; left: 5px; top: 12px; width: 1px; height: 15px; background: rgba(255,255,255,.8); }
+#textSection .addText { margin: 4px 12px 6px 30px; }
+.tlist { list-style: none; margin: 0 12px 6px 30px; padding: 0; }
+.tlist li { display: flex; align-items: center; gap: 4px; padding: 3px 6px; border-radius: 5px; cursor: pointer; }
+.tlist li.active { background: var(--panel2); outline: 1px solid var(--accent); }
+.tlist .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tlist button { padding: 0 5px; font-size: 11px; }
+.field textarea { grid-column: 1 / 3; width: 100%; box-sizing: border-box; resize: vertical; background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font: inherit; color: inherit; }
+.imgField { display: flex; gap: 4px; align-items: center; }
+.imgField img { width: 34px; height: 24px; object-fit: cover; border-radius: 3px; border: 1px solid var(--line); }
+#panel .hint { color: var(--muted); font-size: 11px; margin: 6px 12px 8px 30px; padding: 0; text-align: left; }
+#textSection { scroll-margin-top: 90px; }

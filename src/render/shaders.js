@@ -12,6 +12,8 @@ void main() {
   c += texture2D(tSrc, vUv + texel * vec2(-0.5, -0.5)).rgb; c += texture2D(tSrc, vUv + texel * vec2(0.5, -0.5)).rgb;
   c += texture2D(tSrc, vUv + texel * vec2(-0.5, 0.5)).rgb;  c += texture2D(tSrc, vUv + texel * vec2(0.5, 0.5)).rgb;
   c *= 0.25;
+  // One NaN/Inf pixel would otherwise blur across the whole frame and blacken it.
+  if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
   float l = max(c.r, max(c.g, c.b));
   float knee = threshold * 0.5;
   float soft = clamp(l - threshold + knee, 0.0, 2.0 * knee);
@@ -180,6 +182,7 @@ void main() {
 
 export const finalFS = /* glsl */`
 uniform sampler2D tColor; uniform int bgMode; uniform vec3 bg1, bg2; uniform float bgAngle; uniform bool straight; uniform float pixelBlock;
+uniform sampler2D tBgImage; uniform sampler2D tText; // premultiplied 2D-canvas layers (render/overlay.js)
 varying vec2 vUv;
 void main() {
   // Pixelate runs last so outline, glow, shadow and highlights are pixelated too (background stays smooth).
@@ -194,7 +197,10 @@ void main() {
   if (bgMode == 1) bg = vec4(bg1, 1.0);
   else if (bgMode == 2) { float t = clamp(dot(vUv - 0.5, vec2(cos(bgAngle), sin(bgAngle))) + 0.5, 0.0, 1.0); bg = vec4(mix(bg1, bg2, t), 1.0); }
   else if (bgMode == 3) { float t = clamp(length(vUv - 0.5) * 1.414, 0.0, 1.0); bg = vec4(mix(bg1, bg2, t), 1.0); }
+  else if (bgMode == 4) bg = texture2D(tBgImage, vUv);
   vec4 o = c + bg * (1.0 - c.a);
+  vec4 txt = texture2D(tText, vUv);
+  o = txt + o * (1.0 - txt.a);
   if (straight) o.rgb = o.a > 0.0 ? o.rgb / o.a : vec3(0.0);
   gl_FragColor = o;
 }`;

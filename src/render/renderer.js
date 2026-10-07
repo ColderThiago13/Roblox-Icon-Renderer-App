@@ -5,8 +5,9 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import * as S from './shaders.js';
 import { hexToVec3 } from '../settings.js';
+import { drawBackground, drawTexts, imageFor } from './overlay.js';
 
-export const LAYER = { MODEL: 0, GROUND: 2, VFX: 3, HL_FILL: 4, HL_MASK: 5 };
+export const LAYER = { MODEL: 0, GROUND: 2, VFX: 3, HL_FILL: 4, HL_MASK: 5, TRAIL: 6 };
 const deg = THREE.MathUtils.degToRad;
 const TONE = { none: 0, aces: 1, agx: 2, neutral: 3 };
 const angles = (yaw, pitch) => new THREE.Vector3(Math.sin(deg(yaw)) * Math.cos(deg(pitch)), Math.sin(deg(pitch)), -Math.cos(deg(yaw)) * Math.cos(deg(pitch)));
@@ -30,7 +31,7 @@ export function samplePoints(object, max = 40000) {
   return new Float32Array(out);
 }
 
-function boundsOf(points) {
+export function boundsOf(points) {
   if (!points.length) return { center: new THREE.Vector3(), radius: 1, minY: 0 };
   const box = new THREE.Box3();
   const v = new THREE.Vector3();
@@ -102,8 +103,48 @@ export class IconRenderer {
     this.gl.render(this.fsScene, this.fsCam);
   }
 
-  setupCamera(job, c) {
-    const points = c.fitVfx && job.vfxPoints?.length ? concat(job.points, job.vfxPoints) : job.points;
+  // Points the camera frames: the model, plus VFX/trails when the user asked to fit them.
+  framingPoints(job, s) {
+    let points = s.camera.fitVfx && s.vfx.enabled && job.vfxPoints?.length ? concat(job.points, job.vfxPoints) : job.points;
+    if (s.trails.enabled && s.trails.fit && job.trailPoints?.length) points = concat(points, job.trailPoints);
+    return points;
+  }
+
+  // Framing that holds a whole clip. A subsample of every frame places the camera; then each frame's exact
+  // screen-space extremes are added, so thin limbs, particles or trail tips skipped by the subsample never clip.
+  // poseAt(t) poses the job at clip time t.
+  clipFit(job, s, times, poseAt) {
+    const sub = [], extremes = [], v = new THREE.Vector3(), step = Math.max(1, Math.ceil(times.length / 240));
+    let minY = Infinity;
+    times.forEach((t, i) => {
+      if (i % step && i !== times.length - 1) return;
+      poseAt(t);
+      const pts = this.framingPoints(job, s), stride = Math.max(1, Math.ceil(pts.length / 9000)) * 3;
+      for (let k = 0; k < pts.length; k += stride) sub.push(pts[k], pts[k + 1], pts[k + 2]);
+      for (let k = 1; k < job.points.length; k += 3) minY = Math.min(minY, job.points[k]);
+    });
+    const fit = { points: new Float32Array(sub), minY: Number.isFinite(minY) ? minY : 0 };
+    const { cam } = this.setupCamera(job, s, fit);
+    const vp = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    times.forEach((t) => {
+      poseAt(t);
+      const pts = this.framingPoints(job, s), lo = [Infinity, Infinity], hi = [-Infinity, -Infinity], at = [0, 0, 0, 0];
+      for (let k = 0; k < pts.length; k += 3) {
+        v.set(pts[k], pts[k + 1], pts[k + 2]).applyMatrix4(vp);
+        if (v.x < lo[0]) { lo[0] = v.x; at[0] = k; }
+        if (v.x > hi[0]) { hi[0] = v.x; at[1] = k; }
+        if (v.y < lo[1]) { lo[1] = v.y; at[2] = k; }
+        if (v.y > hi[1]) { hi[1] = v.y; at[3] = k; }
+      }
+      if (pts.length) for (const k of at) extremes.push(pts[k], pts[k + 1], pts[k + 2]);
+    });
+    fit.points = concat(fit.points, new Float32Array(extremes));
+    return fit;
+  }
+
+  // fit = { points, minY } locks the framing (animated export); otherwise frame the current pose.
+  setupCamera(job, s, fit = null) {
+    const c = s.camera, points = fit?.points ?? this.framingPoints(job, s);
     const { center, radius } = boundsOf(points);
     const persp = c.projection !== 'orthographic';
     const cam = persp ? this.pcam : this.ocam;
@@ -127,11 +168,11 @@ export class IconRenderer {
       x0 = Math.min(x0, v.x); x1 = Math.max(x1, v.x); y0 = Math.min(y0, v.y); y1 = Math.max(y1, v.y);
     }
     if (!(x1 > x0)) { x0 = y0 = -1; x1 = y1 = 1; }
-    const s = ((1 - c.padding) / Math.max((x1 - x0) / 2, (y1 - y0) / 2, 1e-6)) * c.zoom;
-    const M = new THREE.Matrix4().set(s, 0, 0, -s * (x0 + x1) / 2 + c.offsetX * 2, 0, s, 0, -s * (y0 + y1) / 2 + c.offsetY * 2, 0, 0, 1, 0, 0, 0, 0, 1);
+    const k = ((1 - c.padding) / Math.max((x1 - x0) / 2, (y1 - y0) / 2, 1e-6)) * c.zoom;
+    const M = new THREE.Matrix4().set(k, 0, 0, -k * (x0 + x1) / 2 + c.offsetX * 2, 0, k, 0, -k * (y0 + y1) / 2 + c.offsetY * 2, 0, 0, 1, 0, 0, 0, 0, 1);
     cam.projectionMatrix.premultiply(M);
     cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert();
-    return { cam, center, radius, minY: boundsOf(job.points).minY };
+    return { cam, center, radius, minY: fit?.minY ?? boundsOf(job.points).minY };
   }
 
   setupScene(job, s, frame) {
@@ -139,6 +180,7 @@ export class IconRenderer {
     for (const child of [...sc.children]) if (!this.rig.includes(child)) sc.remove(child);
     sc.add(job.root);
     if (job.vfxGroup && s.vfx.enabled) sc.add(job.vfxGroup);
+    if (job.trailGroup && s.trails.enabled && s.trails.length > 0) sc.add(job.trailGroup);
     if (job.hlGroup) sc.add(job.hlGroup);
     sc.environmentIntensity = s.lighting.env;
 
@@ -183,6 +225,26 @@ export class IconRenderer {
     this.ground.material.opacity = s.shadows.groundOpacity;
   }
 
+  // A 2D-canvas layer at the output size as a premultiplied texture; transparent black when there is nothing to draw.
+  layerTexture(name, size, draw) {
+    if (!draw) return this.black;
+    let L = this[name];
+    if (!L) {
+      const canvas = document.createElement('canvas');
+      L = this[name] = { canvas, tex: new THREE.CanvasTexture(canvas) };
+      L.tex.premultiplyAlpha = true;
+      L.tex.colorSpace = THREE.NoColorSpace; // final pass works in display (sRGB) values
+      L.tex.generateMipmaps = false; L.tex.minFilter = THREE.LinearFilter;
+    }
+    if (L.canvas.width !== size) { L.canvas.width = L.canvas.height = size; L.tex.dispose(); }
+    const g = L.canvas.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, size, size);
+    draw(g);
+    L.tex.needsUpdate = true;
+    return L.tex;
+  }
+
   distanceField(maskTex, W, R) {
     const res = new THREE.Vector2(W, W);
     const opts = { type: THREE.FloatType, filter: THREE.NearestFilter };
@@ -201,10 +263,10 @@ export class IconRenderer {
   }
 
   // size: output px. out: 'screen' or 'pixels'. Returns ImageData for 'pixels'.
-  render(job, s, size, { out = 'screen', supersample = 1 } = {}) {
+  render(job, s, size, { out = 'screen', supersample = 1, fit = null } = {}) {
     const gl = this.gl;
     const W = Math.round(size * supersample), px = W / 512;
-    const frame = this.setupCamera(job, s.camera);
+    const frame = this.setupCamera(job, s, fit);
     const cam = frame.cam;
     this.setupScene(job, s, frame);
 
@@ -214,13 +276,17 @@ export class IconRenderer {
     gl.setRenderTarget(sceneRT);
     gl.clear();
     cam.layers.set(LAYER.MODEL);
+    if (s.trails.outline) cam.layers.enable(LAYER.TRAIL);
+    if (s.vfx.outlineVfx) cam.layers.enable(LAYER.VFX);
     gl.render(this.scene, cam);
     const maskRT = this.rt('mask', W, W, { type: THREE.UnsignedByteType });
     this.pass(this.mat('copyAlpha', S.copyAlphaFS, { tSrc: sceneRT.texture }), maskRT);
     // three picks shadow casters by the main camera's layers, so keep pass 1's shadow map (model as caster).
     gl.autoClear = false;
     gl.shadowMap.autoUpdate = false;
-    cam.layers.set(LAYER.GROUND); cam.layers.enable(LAYER.VFX); cam.layers.enable(LAYER.HL_FILL);
+    cam.layers.set(LAYER.GROUND); cam.layers.enable(LAYER.HL_FILL);
+    if (!s.vfx.outlineVfx) cam.layers.enable(LAYER.VFX);
+    if (!s.trails.outline) cam.layers.enable(LAYER.TRAIL);
     gl.setRenderTarget(sceneRT);
     gl.render(this.scene, cam);
     gl.shadowMap.autoUpdate = true;
@@ -256,7 +322,7 @@ export class IconRenderer {
     const outlineW = ol.enabled ? ol.thickness * px : 0, glowSize = gw.enabled ? gw.size * px : 0, blur = ds.enabled ? ds.blur * px : 0;
     if (outlineW > 0 || glowSize > 0 || ds.enabled) {
       const R = Math.min(256, Math.ceil(Math.max(outlineW, glowSize * 2.5, blur) + 2));
-      const dist = this.distanceField(s.vfx.outlineVfx ? cur.texture : maskRT.texture, W, R);
+      const dist = this.distanceField(maskRT.texture, W, R);
       this.pass(this.mat('sil', S.silhouetteFS, {
         tColor: cur.texture, tDist: dist.texture, texel: new THREE.Vector2(1 / W, 1 / W),
         outlineW, outlineColor: new THREE.Vector3(...hexToVec3(ol.color)), outlineOpacity: ol.opacity,
@@ -279,8 +345,13 @@ export class IconRenderer {
       [cur, other] = [other, cur];
     }
 
-    const B = s.background;
-    const finalU = (straight) => ({ tColor: cur.texture, bgMode: ['transparent', 'solid', 'linear', 'radial'].indexOf(B.mode), bg1: new THREE.Vector3(...hexToVec3(B.color1)), bg2: new THREE.Vector3(...hexToVec3(B.color2)), bgAngle: deg(B.angle), straight,
+    const B = s.background, outSize = out === 'screen' ? gl.domElement.width : size;
+    const bgImage = B.mode === 'image' ? imageFor(B.image) : null;
+    const bgTex = this.layerTexture('bgLayer', outSize, bgImage && ((g) => drawBackground(g, bgImage, B, outSize)));
+    let layouts = [];
+    const textTex = this.layerTexture('textLayer', outSize, s.texts?.length && ((g) => { layouts = drawTexts(g, s.texts, outSize); }));
+    this.layouts = layouts; // normalized text boxes of the last render, for hit testing in the preview
+    const finalU = (straight) => ({ tColor: cur.texture, bgMode: ['transparent', 'solid', 'linear', 'radial', 'image'].indexOf(B.mode), tBgImage: bgTex, tText: textTex, bg1: new THREE.Vector3(...hexToVec3(B.color1)), bg2: new THREE.Vector3(...hexToVec3(B.color2)), bgAngle: deg(B.angle), straight,
       // level N = (N + 1)-px blocks at 512, scaled with the output size; as a fraction of the frame
       pixelBlock: Z.pixelate > 0 ? (Z.pixelate + 1) / 512 : 0 });
     if (out === 'screen') {

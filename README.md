@@ -10,19 +10,18 @@ The link always points to the newest version, so it's the only installer you nee
 
 Installs per user (no admin needed) with Desktop and Start Menu shortcuts. Windows SmartScreen may warn because the installer isn't code-signed: choose *More info → Run anyway*. Uninstall from Windows Settings → Apps.
 
-![Roblox Icon Renderer](docs/screenshot.png)
+![The app: a hoverboard with its trails and VFX in the preview](docs/app.png)
 
-## Run from source
+| Icon with background image and text | Animated GIF export | Rig animation export |
+| :---: | :---: | :---: |
+| ![R6 skater with a background image and curved text](docs/example-holy-skate.png) | ![Hoverboard GIF with VFX and trails](docs/example-hoverboard.gif) | ![R6 skater animation GIF](docs/example-skate.gif) |
 
-```sh
-npm install
-npm start          # launch the app
-npm test           # parser tests (pass a rbx-test-files checkout for the full cross-check)
-npm run pack       # unpacked build in dist/win-unpacked
-npm run dist       # Windows installer in dist/
-```
+## Quick start
 
-> If `npm start` fails with `does not provide an export named 'BrowserWindow'`, your shell has `ELECTRON_RUN_AS_NODE=1` set (some editor terminals do this). Unset it and try again.
+1. Install the Windows app using the download link above.
+2. Drop a `.rbxm`, `.rbxmx` or `.obj` file into the window. Set up **Roblox access…** if its meshes or textures need downloading.
+3. Drag to rotate, right-drag to move, and scroll to zoom. Hold **Ctrl** while scrolling for fine zoom adjustments, down to **0.01×**.
+4. Adjust the look in the settings panel, then choose **Export current…**. Check multiple files to export a batch.
 
 ## Roblox asset access
 
@@ -31,8 +30,7 @@ Files only *reference* meshes and textures (`rbxassetid://…`). Since April 202
 - **Open Cloud API key** (preferred): Creator Dashboard → API Keys, with the scope `legacy-asset:manage`. Downloads go through `apis.roblox.com/asset-delivery-api/v1/assetId/{id}`.
 - **.ROBLOSECURITY cookie** (fallback): used with `assetdelivery.roblox.com/v1/asset/?id=`. It grants full account access, so use an alt account.
 
-Credentials are encrypted with the OS keychain (`safeStorage`) and only sent to roblox.com. Everything (credentials, settings, `asset-cache`) lives in `%APPDATA%
-oblox-icon-renderer`, which updates and reinstalls keep. You can also put a file named after the asset ID into that folder to use it offline.
+Credentials are encrypted with the OS keychain (`safeStorage`) and only sent to roblox.com. Everything (credentials, settings, `asset-cache`) lives in `%APPDATA%\roblox-icon-renderer`, which updates and reinstalls keep. You can also put a file named after the asset ID into the asset cache folder to use it offline.
 
 If an asset can't be downloaded, the app still renders: missing meshes show as their bounding box, and every problem is listed under the preview.
 
@@ -44,6 +42,9 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 - FileMesh versions 1.00 to 7.00, including Draco-compressed v7. Only the highest-detail LOD is drawn.
 - Materials: color, transparency, reflectance and material type (Neon glows through bloom; Glass, metals, ForceField).
 - Textures: `TextureID`, where the part color shows through transparent pixels as in Roblox. SurfaceAppearance (color, normal, roughness and metalness maps; Overlay and Transparency alpha modes). Decals, and Textures with stud tiling.
+- Avatar appearance: **BodyColors** on R6/R15 body parts (including legacy BrickColor values), classic **Shirt**, **Pants**, and **ShirtGraphic** T-shirts. Pants draw under shirts on the torso; transparent clothing pixels reveal the body or existing mesh texture. R15 segments share the clothing image across each limb instead of repeating it.
+- **Classic R6 bodies** (a Humanoid with block Torso/arms/legs) render like Studio: Roblox's chamfered limb meshes, with body colors, pants, shirt and T-shirt composited into one texture using Roblox's own layout. These files, the classic head mesh and built-in `rbxasset://` files such as the default face are read from your local Roblox Studio or Roblox player install; without one, an equivalent chamfered shape with a box-projected template is used and a warning says so.
+- R6 **CharacterMesh** body replacements with base and overlay textures, including the newer Content properties. Accessories and face decals keep their existing textures and follow rig poses.
 
 **VFX**
 - **Timeline bar** under the preview: scrub to any moment after the VFX started, or play it back (Space) at 0.25×–2×. Exports use the chosen moment.
@@ -53,6 +54,11 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 - `EmitCount` / `EmitDelay` attributes (a common VFX-pack convention) fire a burst at `EmitDelay` seconds on the timeline.
 - Beam: bezier curve, widths, sequences, texture modes and TextureSpeed scrolling. The texture runs top→bottom from Attachment0 to Attachment1; with FaceCamera off the width follows the attachments' Y axes. Fire, Smoke and Sparkles.
 - PointLight, SpotLight and SurfaceLight. Highlight (fill plus a 2D outline).
+
+**Trails**
+- A separate **Trails** section controls visibility, **Length / motion cap (studs)**, lighting, framing, and inclusion in outlines/glow. **Show VFX** and **Show trails** work independently. Set length to zero to hide trails.
+- **Auto** uses the selected rig animation's recent attachment motion, sampled at the chosen animation time. With no animation selected, it previews a straight trail sweeping behind the object (behind the HumanoidRootPart for characters, otherwise away from the model's center), always across the attachment edge so the ribbon shows its full width. **Direction** uses a straight trail along **Direction path: yaw/tilt** instead; **Animation** only shows actual animation motion.
+- Supports the file's Enabled, Lifetime, MinLength, MaxLength, WidthScale, Color, Transparency, FaceCamera, texture tiling/stretching, Brightness, LightEmission, and LightInfluence. The user length caps motion paths; the file's MaxLength can shorten them further. Previews, thumbnails, and exports use the same path. No past motion is shown at animation time zero.
 
 **Animations (rigs)**
 - Files with Motor6D/AnimationConstraint joints or Bones show an **Animation bar**: pick any KeyframeSequence found in the file (or an Animation instance, downloaded on demand), or paste an animation ID/URL and press **Add**. With **Edit checked together** on, the ID is added to every checked rig.
@@ -68,7 +74,13 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 - Color overlay: solid, gradient or rainbow, with normal, multiply, screen, overlay or tint blending.
 - Silhouette effects from a GPU distance field: outline, outer glow, drop shadow.
 - Stylize: sharpen, chromatic aberration, posterize, grain, vignette, and pixelate (level N = (N+1)-px blocks at 512, applied last so outline/glow/shadow are pixelated too; 0 = off).
-- Background: transparent, solid, or linear/radial gradient.
+- Background: transparent, solid, linear/radial gradient, or **an image** (Choose… in the Background section, or drop an image on the preview). Fit (cover, contain, stretch, tile), scale, offset and rotation; Alt+drag moves it and Alt+wheel scales it on the preview. The image is stored with the settings, so profiles and copied settings carry it.
+
+**Text**
+- Any number of text layers per file (**Text** section → **+ Add text**), drawn over the model and background in preview, thumbnails and every export.
+- Fonts: Roblox Studio's own font families (Builder Sans, Luckiest Guy, Fredoka One, Bangers, Montserrat, Oswald, Press Start 2P, Creepster and more, read from your local Roblox install, with their real weights), then common Windows fonts.
+- Size, weight, italic, alignment, letter spacing, line height, opacity; fill and stroke each in **solid, gradient (any angle), radial or rainbow** color modes, stroke (width and color), drop shadow (blur, offset, color), rotation, and **curve** (bend the text along an arc, up or down; multi-line text curves around a shared center).
+- On the preview: drag a text to move it, corner handles resize (stroke scales with it), the top handle rotates (Shift snaps to 15°), the wheel over a text resizes it, double-click edits the text, Delete removes, arrow keys nudge. Layers can be reordered, and **Apply to all** copies them to every file; with *Edit checked together*, edits reach the same layer in the checked files.
 - Pixel values are defined at 512 px and scale with the export size, so an icon looks the same at 256 px and at 4096 px.
 
 **Batch workflow**
@@ -77,31 +89,17 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 - **Profiles** (top of the settings panel): save the current settings under a name and apply them to any file later. Profiles live in `%APPDATA%\roblox-icon-renderer\profiles.json`, so updates keep them.
 - Per-section **Apply to all**, Copy/Paste, **To all files**, and **Default** (settings new files start with).
 - Export the current file, the checked files or all files as PNG, WebP or JPEG at 256 to 4096 px, with optional 2× supersampling.
+- **Export animation…** renders a clip at exact frame times as a PNG sequence, a PNG sprite sheet with JSON frame data, or a GIF. Choose which clock advances (animation, VFX or both), start, duration, FPS and looping; framing is locked across the clip by default. Works for the current, checked or all files, with progress and Cancel. GIFs use one shared palette, 1-bit transparency or a solid background, and are capped at 1024 px.
 
 ## Known limitations
 
 - Unions (CSG) render as their bounding box. Their geometry lives in a separate obfuscated asset.
-- Trails are skipped because they need motion. Clothing (Shirt/Pants) and BodyColors are not applied.
+- Classic clothing maps exactly on classic R6 bodies (with Roblox installed) and block bodies; rounded R15 and custom meshes use a box projection, so seams and curved surfaces may differ from Studio. Custom avatar UV layouts are not reproduced.
+- Layered clothing (WrapLayer/WrapTarget cage deformation), dynamic facial animation, and CurveAnimation are not supported. Layered accessories render their saved mesh shape, with a warning. HumanoidDescription assets must be applied in Studio before saving the model; this app renders the instances present in the file.
+- Trails use at most 128 motion segments over the file's Lifetime (up to 20 seconds); history resets at the beginning of animation playback. Script-driven world movement isn't stored in model files. Wrap and Static texture modes currently share the same attachment-relative tiling.
 - Material textures (wood grain, brick, …) are not reproduced; parts use flat color with per-material roughness and metalness.
 - Built-in `rbxasset://` particle textures are replaced with procedural look-alikes.
 - Highlight `DepthMode = Occluded` is drawn as AlwaysOnTop.
-
-## Releasing a new version
-
-1. Bump `version` in `package.json` (e.g. `0.5.0` → `0.5.1`).
-2. Run `npm run release` with a GitHub token that can write to the repo in `GH_TOKEN`. It builds the installer and publishes a GitHub release with `Roblox-Icon-Renderer-Setup.exe`, its `.blockmap` and `latest.yml`.
-3. Installed apps see the release on their next launch and offer the update (only the changed blocks are downloaded).
-
-## Layout
-
-```
-main.js / preload.cjs     Electron shell: app:// protocol, asset download and cache, dialogs
-src/rbx/                  binary.js, xml.js (model parsers), mesh.js (FileMesh), instance.js
-src/scene/                build.js (instances → three.js), vfx.js, assets.js, job.js
-src/render/               renderer.js (multi-pass pipeline), shaders.js
-src/ui/                   app.js, style.css
-src/settings.js           settings schema (drives both the UI panel and the defaults)
-```
 
 ## References
 

@@ -42,6 +42,7 @@
     <button id="exportOne">Export current…</button>
     <button id="exportSel">Export checked…</button>
     <button id="exportAll">Export all…</button>
+    <button id="exportAnim" title="Export a PNG sequence, sprite sheet or GIF over time">Export animation…</button>
     <span class="sep"></span>
     <span class="grow"></span>
     <span id="status"></span>
@@ -60,7 +61,7 @@
     </aside>
 
     <section id="stage">
-      <div id="viewport" class="bg-checker"><canvas id="view"></canvas></div>
+      <div id="viewport" class="bg-checker"><canvas id="view"></canvas><div id="textSel" hidden><i data-h="scale" class="nw"></i><i data-h="scale" class="ne"></i><i data-h="scale" class="sw"></i><i data-h="scale" class="se"></i><i data-h="rotate" class="rot" title="Rotate (Shift snaps)"></i></div></div>
       <div id="timeline" hidden>
         <button id="playBtn" class="chip" title="Play / pause VFX (Space)">▶</button>
         <button id="restartBtn" class="chip" title="Back to start">⏮</button>
@@ -84,7 +85,7 @@
         <button data-bg="white" class="chip">White</button>
         <button data-bg="black" class="chip">Black</button>
         <span class="grow"></span>
-        <span class="tip">Drag: rotate · Right-drag: move · Wheel: zoom</span>
+        <span class="tip">Drag: rotate · Right-drag: move · Wheel: zoom (Ctrl: fine) · Alt: background image</span>
         <button id="reloadBtn" title="Re-download assets and rebuild">Reload file</button>
       </footer>
       <details id="warnBox" hidden><summary id="warnSummary"></summary><ul id="warnList"></ul></details>
@@ -110,7 +111,7 @@
     </aside>
   </main>
 
-  <div id="dropOverlay" hidden>Drop files to add</div>
+  <div id="dropOverlay" hidden>Drop models to add them, or an image to use as the background</div>
 
   <dialog id="profileDlg">
     <form method="dialog">
@@ -141,6 +142,29 @@
         <button value="cancel">Close</button>
         <button value="save" class="primary" id="credsSave">Save</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog id="animDlg">
+    <form method="dialog">
+      <h2>Export animation</h2>
+      <div class="grid2">
+        <label>Files <select id="axScope"><option value="current">Current file</option><option value="checked">Checked files</option><option value="all">All files</option></select></label>
+        <label>Format <select id="axFormat"><option value="png">PNG sequence</option><option value="sheet">PNG sprite sheet + JSON</option><option value="gif">GIF</option></select></label>
+        <label>Time source <select id="axSource" title="The rig animation and the VFX have separate clocks; choose which advance"><option value="both">Animation + VFX</option><option value="animation">Animation only</option><option value="vfx">VFX only</option></select></label>
+        <label>FPS <input id="axFps" type="number" min="1" max="60" step="1" value="24"></label>
+        <label>Start (s) <input id="axStart" type="number" min="0" step="0.01" value="0"></label>
+        <label>Duration (s) <input id="axDuration" type="number" min="0.05" step="0.01" value="2"></label>
+        <label class="inline"><input id="axLoop" type="checkbox" checked> Loop (skip the duplicate last frame)</label>
+        <label class="inline"><input id="axLock" type="checkbox" checked> Lock framing across the clip</label>
+        <label class="sheetOnly">Sheet columns (0 = auto) <input id="axCols" type="number" min="0" max="64" step="1" value="0"></label>
+        <label class="sheetOnly">Padding (px) <input id="axPad" type="number" min="0" max="64" step="1" value="0"></label>
+        <label class="gifOnly">GIF background <select id="axGifBg"><option value="transparent">Transparent (1-bit edges)</option><option value="solid">Solid color</option></select></label>
+        <label class="gifOnly">Color <input id="axGifColor" type="color" value="#2b2d42"></label>
+      </div>
+      <p class="muted">Size and quality come from the toolbar. GIFs are limited to 256 colors and 1024 px; soft glows look best on a solid background or as PNG.</p>
+      <div id="axProgressRow" hidden><progress id="axProgress" max="1" value="0"></progress> <span id="axProgressLabel"></span></div>
+      <div class="row"><span class="grow"></span><button id="axCancel" type="button">Close</button><button id="axGo" class="primary" type="button">Export…</button></div>
     </form>
   </dialog>
 

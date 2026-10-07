@@ -68,6 +68,39 @@ ipcMain.handle('asset:get', async (_e, id) => {
   return inflight.get(id);
 });
 
+// rbxasset:// files (classic body meshes, the default face, …) ship with Roblox, not the asset API,
+// so read them from the newest local Roblox Studio/Player install. Read-only, confined to its content folder.
+let robloxContent = null; // one shared lookup, however many requests arrive at once
+function robloxContentDir() {
+  robloxContent ??= (async () => {
+    const roots = [path.join(process.env.LOCALAPPDATA || '', 'Roblox', 'Versions'), path.join(process.env['ProgramFiles(x86)'] || '', 'Roblox', 'Versions')];
+    let best = null;
+    for (const root of roots) {
+      for (const d of await fs.readdir(root).catch(() => [])) {
+        const content = path.join(root, d, 'content');
+        const stat = await fs.stat(path.join(content, 'avatar', 'meshes', 'torso.mesh')).catch(() => null);
+        if (stat && (!best || stat.mtimeMs > best.time)) best = { content, time: stat.mtimeMs };
+      }
+    }
+    return best?.content ?? null;
+  })();
+  return robloxContent;
+}
+ipcMain.handle('rbxasset:get', async (_e, rel) => {
+  const dir = await robloxContentDir();
+  if (!dir) throw new Error(`rbxasset://${rel} needs Roblox Studio or the Roblox player installed`);
+  const file = path.normalize(path.join(dir, String(rel)));
+  if (!file.startsWith(dir + path.sep)) throw new Error('Bad rbxasset path');
+  return fs.readFile(file);
+});
+ipcMain.handle('rbxasset:list', async (_e, rel) => {
+  const dir = await robloxContentDir();
+  if (!dir) return [];
+  const folder = path.normalize(path.join(dir, String(rel)));
+  if (!folder.startsWith(dir + path.sep)) throw new Error('Bad rbxasset path');
+  return fs.readdir(folder).catch(() => []);
+});
+
 ipcMain.handle('config:get', async () => {
   const cfg = await readConfig();
   return { hasApiKey: !!cfg.apiKey, hasCookie: !!cfg.cookie };
@@ -91,9 +124,14 @@ ipcMain.handle('dialog:folder', async (e) => {
   const r = await dialog.showOpenDialog(BrowserWindow.fromWebContents(e.sender), { properties: ['openDirectory', 'createDirectory'] });
   return r.canceled ? null : r.filePaths[0];
 });
+// The extension comes from the suggested name; a typed name without it still saves as that format.
 ipcMain.handle('dialog:save', async (e, defaultName) => {
-  const r = await dialog.showSaveDialog(BrowserWindow.fromWebContents(e.sender), { defaultPath: defaultName });
-  return r.canceled ? null : r.filePath;
+  const ext = path.extname(String(defaultName)).slice(1).toLowerCase();
+  const filters = ext ? [{ name: `${ext.toUpperCase()} image`, extensions: ext === 'jpg' ? ['jpg', 'jpeg'] : [ext] }] : [];
+  const r = await dialog.showSaveDialog(BrowserWindow.fromWebContents(e.sender), { defaultPath: defaultName, filters });
+  if (r.canceled || !r.filePath) return null;
+  const typed = path.extname(r.filePath).slice(1).toLowerCase();
+  return !ext || filters[0].extensions.includes(typed) ? r.filePath : `${r.filePath}.${ext}`;
 });
 ipcMain.handle('file:write', async (_e, filePath, data) => {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -173,6 +211,11 @@ async function renderTest(win) {
       }
       const anim = ${JSON.stringify(process.env.RIR_TEST_ANIM || '')};
       if (anim && f.job.animations?.length) { const [i, t] = anim.split('@').map(Number); f.animSel = f.job.animations.at(i)?.key ?? ''; f.animTime = t; }
+      // RIR_TEST_EXPORT="png,sheet,gif": a 1 s, 12 fps clip per format, written next to the stills.
+      for (const format of ${JSON.stringify((process.env.RIR_TEST_EXPORT || '').split(',').filter(Boolean))}) {
+        await app.exportClip(f, { size: ${+(process.env.RIR_TEST_EXPORT_SIZE || 192)}, ss: ${+(process.env.RIR_TEST_EXPORT_SS || 1)}, format, source: 'both', fps: 12, start: 0, duration: 1, loop: true, lock: true, cols: 0, pad: 2, gifBg: null },
+          ${JSON.stringify(out)}, f.name.replace(/\\.[^.]+$/, '') + '-' + format, () => {});
+      }
       const plain = await app.encode(f, { size: 512, format: 'png', ss: 2 });
       const times = [];
       for (const t of ${JSON.stringify((process.env.RIR_TEST_TIMES || '').split(',').filter(Boolean).map(Number))}) {
@@ -198,6 +241,39 @@ async function renderTest(win) {
     console.log(`${r.name}: ok${r.warnings.length ? ' — ' + r.warnings.join(' | ') : ''}${r.anims.length ? ' | animations: ' + r.anims.join(', ') : ''}`);
   }
   await new Promise((r) => setTimeout(r, 1500));
+  // RIR_TEST_DRAG="x0,y0,x1,y1" (0..1 of the preview): real mouse drag of a text, then of its rotate handle.
+  if (process.env.RIR_TEST_DRAG) {
+    const js = (code) => win.webContents.executeJavaScript(code);
+    win.focus(); win.webContents.focus();
+    for (let i = 0; i < 100 && await js(`!!document.getElementById('splash')`); i++) await new Promise((r) => setTimeout(r, 100)); // splash covers the window
+    await js('window.__app.select(window.__app.files[0])'); // fresh preview (and text layout) after the edits above
+    await new Promise((r) => setTimeout(r, 1500));
+    const rect = () => js(`(() => { const r = document.getElementById('view').getBoundingClientRect(); return [r.left, r.top, r.width]; })()`);
+    let [left, top, size] = await rect();
+    for (let i = 0; i < 30; i++) { // wait until the preview stops resizing
+      await new Promise((r) => setTimeout(r, 200));
+      const next = await rect();
+      if (next.join() === [left, top, size].join()) break;
+      [left, top, size] = next;
+    }
+    const mouse = (type, [x, y]) => win.webContents.sendInputEvent({ type, x: Math.round(x), y: Math.round(y), button: 'left', clickCount: 1 });
+    const drag = async (from, to) => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      mouse('mouseMove', from); await wait(100); mouse('mouseDown', from); await wait(100);
+      for (let i = 1; i <= 10; i++) { mouse('mouseMove', [from[0] + ((to[0] - from[0]) * i) / 10, from[1] + ((to[1] - from[1]) * i) / 10]); await new Promise((r) => setTimeout(r, 30)); }
+      mouse('mouseUp', to);
+      await new Promise((r) => setTimeout(r, 300));
+    };
+    const [x0, y0, x1, y1] = process.env.RIR_TEST_DRAG.split(',').map(Number);
+    await drag([left + x0 * size, top + y0 * size], [left + x1 * size, top + y1 * size]);
+    console.log('after move:', await js(`JSON.stringify(window.__app.files[0].settings.texts.map((t) => [t.x, t.y, t.rotation]))`));
+    const knob = await js(`(() => { const e = document.querySelector('#textSel:not([hidden]) .rot'); if (!e) return null; const r = e.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+    if (knob) await drag(knob, [knob[0] + 120, knob[1] + 60]);
+    const corner = await js(`(() => { const e = document.querySelector('#textSel:not([hidden]) .se'); if (!e) return null; const r = e.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+    if (corner) await drag(corner, [corner[0] + 60, corner[1] + 60]);
+    console.log('drag result:', knob ? 'handle found' : 'no selection handle', await js(`JSON.stringify(window.__app.files[0].settings.texts.map((t) => [t.x, t.y, t.rotation, t.size, t.strokeWidth]))`));
+    await new Promise((r) => setTimeout(r, 500));
+  }
   await fs.writeFile(path.join(out, 'ui.png'), (await win.webContents.capturePage()).toPNG());
   app.quit();
 }

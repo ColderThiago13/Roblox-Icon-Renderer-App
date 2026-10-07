@@ -9,7 +9,7 @@ const s = (key, label, options, def) => ({ key, label, type: 'select', options, 
 export const SCHEMA = [
   { id: 'camera', title: 'Camera', fields: [
     r('yaw', 'Rotation', -180, 180, 1, 30), r('pitch', 'Tilt', -89, 89, 1, 20), r('roll', 'Roll', -180, 180, 1, 0),
-    r('zoom', 'Zoom', 0.2, 4, 0.01, 1), s('projection', 'Projection', ['perspective', 'orthographic'], 'perspective'),
+    r('zoom', 'Zoom', 0.01, 4, 0.0001, 1), s('projection', 'Projection', ['perspective', 'orthographic'], 'perspective'),
     r('fov', 'Field of view', 5, 90, 1, 30), r('offsetX', 'Offset X', -0.5, 0.5, 0.005, 0), r('offsetY', 'Offset Y', -0.5, 0.5, 0.005, 0),
     r('padding', 'Padding', 0, 0.45, 0.01, 0.08), b('fitVfx', 'Fit VFX in frame', false),
   ] },
@@ -32,6 +32,13 @@ export const SCHEMA = [
     r('litLight', 'Scene light for lit VFX (LightInfluence)', 0, 5, 0.05, 2),
     r('seed', 'Random seed', 0, 999, 1, 1), b('includeBursts', 'Fire EmitCount bursts (at EmitDelay)', true),
     r('maxParticles', 'Max particles / emitter', 100, 20000, 100, 20000), b('outlineVfx', 'Outline/glow includes VFX', false),
+  ] },
+  { id: 'trails', title: 'Trails', fields: [
+    b('enabled', 'Show trails', true), r('length', 'Length / motion cap (studs)', 0, 100, 0.05, 4),
+    s('mode', 'Path', ['auto', 'direction', 'animation'], 'auto'),
+    r('yaw', 'Direction path: yaw', -180, 180, 1, 180), r('pitch', 'Direction path: tilt', -89, 89, 1, 0),
+    r('litLight', 'Scene light for lit trails', 0, 5, 0.05, 2),
+    b('fit', 'Fit trails in frame', false), b('outline', 'Include in outline/glow', false),
   ] },
   { id: 'bloom', title: 'Bloom', fields: [
     b('enabled', 'Enabled', true), r('threshold', 'Threshold', 0, 4, 0.01, 1.5), r('strength', 'Strength', 0, 3, 0.01, 0.6), r('radius', 'Radius', 0, 1, 0.01, 0.6),
@@ -59,20 +66,48 @@ export const SCHEMA = [
     r('posterize', 'Posterize levels (0=off)', 0, 32, 1, 0), r('grain', 'Film grain', 0, 1, 0.01, 0), r('vignette', 'Vignette', 0, 1, 0.01, 0),
   ] },
   { id: 'background', title: 'Background', fields: [
-    s('mode', 'Mode', ['transparent', 'solid', 'linear', 'radial'], 'transparent'), c('color1', 'Color 1', '#2b2d42'), c('color2', 'Color 2', '#0b0c10'), r('angle', 'Angle', 0, 360, 1, 90),
+    s('mode', 'Mode', ['transparent', 'solid', 'linear', 'radial', 'image'], 'transparent'), c('color1', 'Color 1', '#2b2d42'), c('color2', 'Color 2', '#0b0c10'), r('angle', 'Angle', 0, 360, 1, 90),
+    { key: 'image', label: 'Image', type: 'image', def: '' }, s('imageFit', 'Image fit', ['cover', 'contain', 'stretch', 'tile'], 'cover'),
+    r('imageScale', 'Image scale (Alt+wheel)', 0.05, 8, 0.01, 1), r('imageX', 'Image offset X (Alt+drag)', -1, 1, 0.005, 0), r('imageY', 'Image offset Y', -1, 1, 0.005, 0),
+    r('imageRotation', 'Image rotation', -180, 180, 1, 0),
   ] },
 ];
+
+// Color modes for text fill and stroke, like the model's color overlay. Angle 90 runs top to bottom.
+export const FILLS = ['solid', 'gradient', 'radial', 'rainbow'];
+
+// Text layers (settings.texts, drawn in order, last on top). Sizes are px at 512; x/y are -0.5..0.5 with +y up.
+export const TEXT_FIELDS = [
+  { key: 'text', label: 'Text', type: 'textarea', def: 'Text' }, { key: 'font', label: 'Font', type: 'font', def: 'Builder Sans' },
+  { key: 'weight', label: 'Weight', type: 'weight', def: 800 }, b('italic', 'Italic', false),
+  r('size', 'Size (px)', 4, 400, 1, 64), s('align', 'Align', ['center', 'left', 'right'], 'center'),
+  r('spacing', 'Letter spacing (px)', -20, 100, 0.5, 0), r('lineHeight', 'Line height', 0.6, 3, 0.01, 1.1),
+  s('fill', 'Fill', FILLS, 'solid'), c('color', 'Color', '#ffffff'), c('color2', 'Color 2 (gradient)', '#ffd166'),
+  r('fillAngle', 'Gradient / rainbow angle', 0, 360, 1, 90), r('opacity', 'Opacity', 0, 1, 0.01, 1),
+  r('strokeWidth', 'Stroke (px)', 0, 40, 0.5, 6), s('strokeFill', 'Stroke fill', FILLS, 'solid'), c('strokeColor', 'Stroke color', '#000000'), c('strokeColor2', 'Stroke color 2', '#ffffff'),
+  r('shadowSize', 'Shadow blur (px)', 0, 60, 0.5, 0), c('shadowColor', 'Shadow color', '#000000'), r('shadowX', 'Shadow X (px)', -60, 60, 0.5, 0), r('shadowY', 'Shadow Y (px)', -60, 60, 0.5, 4),
+  r('x', 'Position X', -0.5, 0.5, 0.001, 0), r('y', 'Position Y', -0.5, 0.5, 0.001, 0.36),
+  r('rotation', 'Rotation', -180, 180, 1, 0), r('curve', 'Curve (arc degrees)', -360, 360, 1, 0),
+];
+export function textLayer(patch = {}) {
+  const t = { ...Object.fromEntries(TEXT_FIELDS.map((f) => [f.key, f.def])), id: Math.random().toString(36).slice(2, 10), ...patch };
+  if (patch.gradient && !patch.fill) t.fill = 'gradient'; // layers saved before fill modes
+  delete t.gradient;
+  return t;
+}
 
 export function defaultSettings() {
   const out = {};
   for (const sec of SCHEMA) { out[sec.id] = {}; for (const f of sec.fields) out[sec.id][f.key] = f.def; }
+  out.texts = [];
   return out;
 }
 
 // Fill in any keys missing from older saved settings.
 export function withDefaults(saved) {
   const d = defaultSettings();
-  for (const id of Object.keys(d)) Object.assign(d[id], saved?.[id]);
+  for (const id of Object.keys(d)) if (id !== 'texts') Object.assign(d[id], saved?.[id]);
+  d.texts = (Array.isArray(saved?.texts) ? saved.texts : []).map((t) => textLayer(t));
   return d;
 }
 

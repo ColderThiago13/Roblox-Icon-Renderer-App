@@ -1,12 +1,13 @@
 {
   "name": "roblox-icon-renderer",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Desktop icon renderer for Roblox .rbxm/.rbxmx/.obj files with post-processing and VFX",
   "main": "main.js",
   "type": "module",
   "scripts": {
     "start": "electron .",
-    "test": "node test/parsers.test.js && node test/anim.test.js",
+    "test": "node test/parsers.test.js && node test/anim.test.js && node test/scene.test.js",
+    "test:render": "electron test/render.cjs",
     "dist": "electron-builder --win",
     "pack": "electron-builder --dir",
     "release": "electron-builder --win --publish always"
@@ -24,6 +25,9 @@
       "node_modules/three/package.json",
       "node_modules/three/build/**/*",
       "node_modules/fzstd/**/*",
+      "node_modules/gifenc/package.json",
+      "node_modules/gifenc/LICENSE.md",
+      "node_modules/gifenc/dist/gifenc.esm.js",
       {
         "from": "node_modules/three/examples/jsm",
         "to": "node_modules/three/examples/jsm",
@@ -58,6 +62,7 @@
   "dependencies": {
     "electron-updater": "^6.8.9",
     "fzstd": "^0.1.1",
+    "gifenc": "^1.0.3",
     "three": "^0.186.1"
   },
   "devDependencies": {

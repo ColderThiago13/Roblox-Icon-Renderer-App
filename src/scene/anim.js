@@ -153,7 +153,7 @@ export function buildRig(tree, partObjects, skinned = []) {
 
   return {
     // track = null restores the pose saved in the file.
-    apply(track, time) {
+    apply(track, time, transformsOnly = false) {
       const world = new Map();
       for (const [part, link] of order) {
         let m;
@@ -170,7 +170,7 @@ export function buildRig(tree, partObjects, skinned = []) {
         if (g) g.matrix.copy(m);
       }
       for (const b of bones) b.boneT = track ? sampleTrack(track, nameOf(b), time) : null;
-      for (const sk of skins) deform(sk, !!track);
+      if (!transformsOnly) for (const sk of skins) deform(sk, !!track);
     },
   };
 }

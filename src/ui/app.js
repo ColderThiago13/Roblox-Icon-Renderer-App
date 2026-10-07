@@ -1,9 +1,12 @@
 import { IconRenderer } from '../render/renderer.js';
-import { createJob, updateVfx, setPose } from '../scene/job.js';
+import { createJob, updateVfx, updateTrails, setPose } from '../scene/job.js';
+import { wheelZoom } from './zoom.js';
 import { loadAnimationId } from '../scene/anim.js';
 import { assetId } from '../rbx/instance.js';
 import { clearMemoryCache } from '../scene/assets.js';
-import { SCHEMA, defaultSettings, withDefaults, clone } from '../settings.js';
+import { SCHEMA, TEXT_FIELDS, textLayer, defaultSettings, withDefaults, clone, hexToVec3 } from '../settings.js';
+import { hitText, fontFamilies, loadFamily, overlayPending, overlayReady } from '../render/overlay.js';
+import { frameTimes, gifDelays, sheetLayout, flatten, opaqueSamples, MAX_GIF_SIZE } from './animexport.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('view');
@@ -14,7 +17,7 @@ let nextId = 1;
 
 const store = {
   get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
-  set(k, v) { localStorage.setItem(k, JSON.stringify(v)); },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { status('Could not save locally (storage full — a large background image?)'); } },
 };
 const baseSettings = () => withDefaults(store.get('defaultSettings', null));
 const status = (t) => { $('status').textContent = t; };
@@ -49,6 +52,7 @@ async function load(file) {
 
 function select(file) {
   current = file;
+  selectedText = null;
   setPlaying(false); setAnimPlaying(false);
   renderList(); buildPanel(); renderWarnings(); syncTimeline(); syncAnimBar(); requestPreview();
 }
@@ -89,9 +93,13 @@ function renderWarnings() {
 
 // ---------------- rendering ----------------
 // VFX state lives on each file's job, so simulate at that file's time right before every render.
-function draw(file, size, opts) {
+function prepare(file) {
   const poseChanged = setPose(file.job, animEntry(file)?.track ?? null, file.animTime);
+  updateTrails(file.job, file.settings.trails);
   updateVfx(file.job, file.settings.vfx, poseChanged);
+}
+function draw(file, size, opts) {
+  prepare(file);
   return renderer.render(file.job, file.settings, size, opts);
 }
 
@@ -111,13 +119,20 @@ function drawPreview() {
   if (!current?.job) { renderer.gl.setRenderTarget(null); renderer.gl.clear(); return; }
   try { draw(current, px); }
   catch (e) { console.error(e); status('Render error: ' + e.message); }
+  previewLayouts = renderer.layouts ?? [];
+  syncTextSel();
+  // Fonts / background image still loading: draw again (and refresh the thumbnail) once they are ready.
+  const file = current;
+  overlayPending(file.settings)?.then(() => { requestPreview(); thumb(file); });
 }
+let previewLayouts = [];
 new ResizeObserver(requestPreview).observe($('viewport'));
 
 const thumbTimers = new Map();
 function thumb(file, delay = 0) {
   clearTimeout(thumbTimers.get(file));
-  thumbTimers.set(file, setTimeout(() => {
+  thumbTimers.set(file, setTimeout(async () => {
+    await overlayReady(file.settings);
     if (!file.job) return;
     const img = draw(file, 112, { out: 'pixels' });
     const c = document.createElement('canvas'); c.width = c.height = 112;
@@ -164,39 +179,199 @@ function buildPanel() {
     };
     sum.append(apply);
     det.append(sum);
-    for (const fd of sec.fields) det.append(fieldEl(sec.id, fd, s[sec.id][fd.key]));
+    for (const fd of sec.fields) det.append(fieldEl(fd, s[sec.id][fd.key], (v) => {
+      setValue(sec.id, fd.key, v);
+      if (sec.id === 'vfx') syncTimeline();
+      if (fd.type === 'image') { if (v) setValue('background', 'mode', 'image'); buildPanel(); }
+    }, `${sec.id}.${fd.key}`));
     panel.append(det);
   }
+  buildTextSection();
   syncTimeline();
 }
 
-function fieldEl(sec, fd, value) {
+// One settings row. set(value) applies it; dataKey lets viewport gestures update the row in place.
+function fieldEl(fd, value, set, dataKey = '') {
   const row = document.createElement('div');
-  row.className = 'field' + (fd.type === 'range' ? '' : ' inline');
-  const label = Object.assign(document.createElement('span'), { textContent: fd.label });
-  row.append(label);
+  row.className = 'field' + (fd.type === 'range' || fd.type === 'textarea' ? '' : ' inline');
+  if (dataKey) row.dataset.key = dataKey;
+  row.append(Object.assign(document.createElement('span'), { textContent: fd.label }));
   if (fd.type === 'range') {
     const num = Object.assign(document.createElement('input'), { type: 'number', min: fd.min, max: fd.max, step: fd.step, value });
     const rng = Object.assign(document.createElement('input'), { type: 'range', min: fd.min, max: fd.max, step: fd.step, value });
-    rng.oninput = () => { num.value = rng.value; setValue(sec, fd.key, +rng.value); if (sec === 'vfx') syncTimeline(); };
-    num.onchange = () => { rng.value = num.value; setValue(sec, fd.key, +num.value); if (sec === 'vfx') syncTimeline(); };
+    rng.oninput = () => { num.value = rng.value; set(+rng.value); };
+    num.onchange = () => { rng.value = num.value; set(+num.value); };
     row.append(num, rng);
-    row.dataset.key = `${sec}.${fd.key}`;
   } else if (fd.type === 'bool') {
     const cb = Object.assign(document.createElement('input'), { type: 'checkbox', checked: value });
-    cb.onchange = () => setValue(sec, fd.key, cb.checked);
+    cb.onchange = () => set(cb.checked);
     row.append(cb);
   } else if (fd.type === 'color') {
     const ci = Object.assign(document.createElement('input'), { type: 'color', value });
-    ci.oninput = () => setValue(sec, fd.key, ci.value);
+    ci.oninput = () => set(ci.value);
     row.append(ci);
+  } else if (fd.type === 'textarea') {
+    const ta = Object.assign(document.createElement('textarea'), { value, rows: 2, spellcheck: false });
+    ta.oninput = () => set(ta.value);
+    row.append(ta);
+  } else if (fd.type === 'image') {
+    const box = Object.assign(document.createElement('span'), { className: 'imgField' });
+    if (value) box.append(Object.assign(document.createElement('img'), { src: value, alt: '' }));
+    const pick = Object.assign(document.createElement('button'), { textContent: value ? 'Change…' : 'Choose…', title: 'Pick an image file (or drop one on the preview)' });
+    pick.onclick = async () => { const url = await pickImage(); if (url) set(url); };
+    box.append(pick);
+    if (value) { const rm = Object.assign(document.createElement('button'), { textContent: '✕', title: 'Remove image' }); rm.onclick = () => set(''); box.append(rm); }
+    row.append(box);
+  } else if (fd.type === 'font' || fd.type === 'weight') {
+    const sel = document.createElement('select');
+    sel.append(new Option(String(value), value, true, true));
+    sel.onchange = () => set(fd.type === 'weight' ? +sel.value : sel.value);
+    fontFamilies().then((list) => (fd.type === 'font' ? fillFonts(sel, list, value) : fillWeights(sel, list, fd.font, value)));
+    row.append(sel);
   } else {
     const sel = document.createElement('select');
     for (const o of fd.options) sel.append(new Option(o[0].toUpperCase() + o.slice(1), o, false, o === value));
-    sel.onchange = () => setValue(sec, fd.key, sel.value);
+    sel.onchange = () => set(sel.value);
     row.append(sel);
   }
   return row;
+}
+
+// Roblox Studio fonts first (from the local install), then system fonts.
+function fillFonts(sel, list, value) {
+  sel.replaceChildren();
+  if (!list.some((f) => f.family === value)) sel.append(new Option(`${value} (missing)`, value));
+  for (const [label, roblox] of [['Roblox Studio fonts', true], ['System fonts', false]]) {
+    const items = list.filter((f) => f.roblox === roblox);
+    if (!items.length) continue;
+    const group = Object.assign(document.createElement('optgroup'), { label });
+    for (const f of items) group.append(new Option(f.family, f.family));
+    sel.append(group);
+  }
+  sel.value = value;
+}
+function fillWeights(sel, list, family, value) {
+  const faces = list.find((f) => f.family === family)?.faces ?? [{ weight: 400 }, { weight: 700 }];
+  const weights = [...new Map(faces.map((f) => [f.weight ?? 400, f.name])).entries()].sort((a, b) => a[0] - b[0]);
+  if (!weights.some(([w]) => w === value)) weights.push([value, 'Custom']);
+  sel.replaceChildren(...weights.map(([w, name]) => new Option(name ? `${name} (${w})` : String(w), w, false, w === value)));
+}
+
+function pickImage() {
+  return new Promise((resolve) => {
+    const input = Object.assign(document.createElement('input'), { type: 'file', accept: 'image/*' });
+    input.onchange = () => (input.files[0] ? imageDataUrl(input.files[0]).then(resolve, (e) => { status('Could not read image: ' + e.message); resolve(null); }) : resolve(null));
+    input.click();
+  });
+}
+// Kept inside the settings (so profiles and copied settings carry it), downscaled to at most 2048 px.
+async function imageDataUrl(file, max = 2048) {
+  const bmp = await createImageBitmap(file), k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const c = canvasOf(Math.max(1, Math.round(bmp.width * k)), Math.max(1, Math.round(bmp.height * k)));
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  return c.toDataURL('image/webp', 0.92);
+}
+
+// ---------------- text layers ----------------
+let selectedText = null; // layer id in the current file
+const layerOf = (f, id) => f?.settings.texts.find((t) => t.id === id);
+const layerName = (text) => String(text).split('\n')[0].trim() || '(empty)';
+
+// Edits go to the layer with this id in the current file (and in checked files when edits are linked).
+function setText(id, patch, rebuild = false) {
+  for (const f of targets()) { const t = layerOf(f, id); if (t) { Object.assign(t, patch); thumb(f, 500); } }
+  if ('font' in patch) loadFamily(patch.font).then(() => { requestPreview(); for (const f of targets()) thumb(f); });
+  requestPreview();
+  if (rebuild) return buildTextSection();
+  for (const [k, v] of Object.entries(patch)) {
+    const row = document.querySelector(`#textSection .field[data-key="text.${k}"]`);
+    if (row) for (const i of row.querySelectorAll('input')) if (i.type !== 'checkbox' && i !== document.activeElement) i.value = v;
+    const name = k === 'text' && document.querySelector(`#textSection li[data-id="${id}"] .name`);
+    if (name) name.textContent = layerName(v);
+  }
+}
+
+function selectText(id) {
+  if (id === selectedText) return syncTextSel();
+  selectedText = id;
+  if (id) openSections.add('text');
+  buildTextSection();
+  syncTextSel();
+  if (id) $('textSection').scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+
+function moveLayer(id, delta) {
+  for (const f of targets()) {
+    const list = f.settings.texts, i = list.findIndex((t) => t.id === id), j = i + delta;
+    if (i < 0 || j < 0 || j >= list.length) continue;
+    [list[i], list[j]] = [list[j], list[i]];
+    thumb(f, 200);
+  }
+  buildTextSection(); requestPreview();
+}
+function deleteLayer(id) {
+  for (const f of targets()) { f.settings.texts = f.settings.texts.filter((t) => t.id !== id); thumb(f, 200); }
+  if (selectedText === id) selectedText = null;
+  buildTextSection(); requestPreview();
+}
+async function addText() {
+  if (!current) return;
+  const t = textLayer({ font: (await fontFamilies()).some((f) => f.family === 'Builder Sans') ? 'Builder Sans' : 'Arial' });
+  for (const f of targets()) { f.settings.texts.push(clone(t)); thumb(f, 300); }
+  loadFamily(t.font).then(requestPreview);
+  selectText(t.id);
+  requestPreview();
+  $('textSection').querySelector('textarea')?.select();
+}
+
+function buildTextSection() {
+  const det = Object.assign(document.createElement('details'), { id: 'textSection', open: openSections.has('text') });
+  det.ontoggle = () => { det.open ? openSections.add('text') : openSections.delete('text'); store.set('openSections', [...openSections]); };
+  const sum = Object.assign(document.createElement('summary'), { textContent: 'Text' });
+  const apply = Object.assign(document.createElement('button'), { className: 'apply', textContent: 'Apply to all', title: 'Copy these text layers to every file' });
+  apply.onclick = (e) => {
+    e.preventDefault();
+    for (const f of files) if (f !== current) { f.settings.texts = clone(current.settings.texts); thumb(f, 200); }
+    status(`Text applied to ${files.length} files`);
+  };
+  sum.append(apply);
+  const add = Object.assign(document.createElement('button'), { className: 'primary addText', textContent: '+ Add text' });
+  add.onclick = addText;
+  const list = Object.assign(document.createElement('ul'), { className: 'tlist' });
+  for (const t of [...(current?.settings.texts ?? [])].reverse()) { // topmost first
+    const li = Object.assign(document.createElement('li'), { className: t.id === selectedText ? 'active' : '' });
+    li.dataset.id = t.id;
+    li.innerHTML = '<span class="name"></span><button title="Bring forward">▲</button><button title="Send backward">▼</button><button title="Delete">✕</button>';
+    li.querySelector('.name').textContent = layerName(t.text);
+    const [up, down, del] = li.querySelectorAll('button');
+    up.onclick = (e) => { e.stopPropagation(); moveLayer(t.id, 1); };
+    down.onclick = (e) => { e.stopPropagation(); moveLayer(t.id, -1); };
+    del.onclick = (e) => { e.stopPropagation(); deleteLayer(t.id); };
+    li.onclick = () => selectText(t.id === selectedText ? null : t.id);
+    list.append(li);
+  }
+  det.append(sum, add, list);
+  const t = layerOf(current, selectedText);
+  if (t) for (const fd of TEXT_FIELDS) {
+    det.append(fieldEl(fd.type === 'weight' ? { ...fd, font: t.font } : fd, t[fd.key], (v) => setText(t.id, { [fd.key]: v }, fd.key === 'font'), `text.${fd.key}`));
+  }
+  det.append(Object.assign(document.createElement('p'), { className: 'hint', textContent:
+    'On the preview: drag a text to move it, corner handles resize, the top handle rotates (Shift snaps to 15°), the wheel over a text resizes it, double-click edits, Delete removes, arrow keys nudge.' }));
+  const old = $('textSection');
+  if (old) old.replaceWith(det); else $('sections').append(det);
+}
+
+// Selection box over the preview, placed from the last preview render's text layout.
+function syncTextSel() {
+  const el = $('textSel'), L = current && previewLayouts.find((l) => l.id === selectedText);
+  if (!L) { el.hidden = true; return; }
+  const vr = $('viewport').getBoundingClientRect(), cr = canvas.getBoundingClientRect(), w = cr.width;
+  el.hidden = false;
+  Object.assign(el.style, {
+    left: `${cr.left - vr.left + L.cx * w}px`, top: `${cr.top - vr.top + L.cy * w}px`,
+    width: `${(L.box[2] - L.box[0]) * w}px`, height: `${(L.box[3] - L.box[1]) * w}px`,
+    transform: `rotate(${L.rot}rad) translate(${L.box[0] * w}px, ${L.box[1] * w}px)`,
+  });
 }
 
 // Sync range fields after viewport interaction without rebuilding the panel.
@@ -206,16 +381,43 @@ function syncField(sec, key) {
 }
 
 // ---------------- viewport interaction ----------------
+// Texts: drag to move, handles scale/rotate, wheel resizes. Alt: drag/wheel the background image. Else: camera.
 let drag = null;
+const framePoint = (e) => { const r = canvas.getBoundingClientRect(); return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]; };
+const round3 = (v) => Math.round(v * 1000) / 1000;
+const bgImageActive = () => current?.settings.background.mode === 'image' && !!current.settings.background.image;
+
 canvas.addEventListener('pointerdown', (e) => {
   if (!current) return;
   canvas.setPointerCapture(e.pointerId);
-  drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey };
+  const [px, py] = framePoint(e);
+  const hit = e.button === 0 && !e.altKey ? hitText(previewLayouts, px, py) : null;
+  if (hit) {
+    selectText(hit);
+    const t = layerOf(current, hit);
+    drag = { mode: 'move', id: hit, px, py, x: t.x, y: t.y };
+    return;
+  }
+  if (selectedText) selectText(null);
+  if (e.altKey && bgImageActive()) drag = { mode: 'bg', x: e.clientX, y: e.clientY };
+  else drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey };
 });
 canvas.addEventListener('pointermove', (e) => {
-  if (!drag) return;
+  if (!drag || drag.handle) return;
+  if (drag.mode === 'move') {
+    const [px, py] = framePoint(e);
+    setText(drag.id, { x: round3(clamp(drag.x + px - drag.px, -0.5, 0.5)), y: round3(clamp(drag.y - (py - drag.py), -0.5, 0.5)) });
+    return;
+  }
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
   drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.mode === 'bg') {
+    const b = current.settings.background, k = 1 / canvas.clientWidth;
+    setValue('background', 'imageX', round3(clamp(b.imageX + dx * k, -1, 1)));
+    setValue('background', 'imageY', round3(clamp(b.imageY - dy * k, -1, 1)));
+    syncField('background', 'imageX'); syncField('background', 'imageY');
+    return;
+  }
   const c = current.settings.camera;
   if (drag.pan) {
     const k = 1 / canvas.clientWidth;
@@ -230,12 +432,62 @@ canvas.addEventListener('pointermove', (e) => {
 });
 canvas.addEventListener('pointerup', () => { drag = null; });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('dblclick', (e) => {
+  const hit = current && hitText(previewLayouts, ...framePoint(e));
+  if (!hit) return;
+  selectText(hit);
+  const ta = document.querySelector('#textSection .field[data-key="text.text"] textarea');
+  ta?.focus(); ta?.select();
+});
 canvas.addEventListener('wheel', (e) => {
   if (!current) return;
   e.preventDefault();
-  setValue('camera', 'zoom', clamp(+(current.settings.camera.zoom * Math.exp(-e.deltaY * 0.001)).toFixed(3), 0.2, 4));
-  syncField('camera', 'zoom');
+  const steps = -e.deltaY / (e.deltaMode === 1 ? 3 : 100), hit = !e.altKey && hitText(previewLayouts, ...framePoint(e));
+  if (hit) {
+    const t = layerOf(current, hit), f = 1.1 ** (e.ctrlKey ? steps / 5 : steps);
+    selectText(hit);
+    setText(hit, { size: clamp(Math.round(t.size * f), 4, 400), strokeWidth: Math.round(t.strokeWidth * f * 2) / 2 });
+  } else if (e.altKey && bgImageActive()) {
+    setValue('background', 'imageScale', round3(clamp(current.settings.background.imageScale * 1.1 ** steps, 0.05, 8)));
+    syncField('background', 'imageScale');
+  } else {
+    setValue('camera', 'zoom', wheelZoom(current.settings.camera.zoom, e, canvas.clientHeight));
+    syncField('camera', 'zoom');
+  }
 }, { passive: false });
+
+// Selection handles: corners scale (size and stroke together), the top knob rotates around the anchor.
+$('textSel').addEventListener('pointerdown', (e) => {
+  const mode = e.target.dataset.h, t = layerOf(current, selectedText), L = previewLayouts.find((l) => l.id === selectedText);
+  if (!mode || !t || !L) return;
+  e.stopPropagation();
+  e.target.setPointerCapture(e.pointerId);
+  const r = canvas.getBoundingClientRect(), cx = r.left + L.cx * r.width, cy = r.top + L.cy * r.height;
+  drag = { handle: true, mode, cx, cy, d0: Math.hypot(e.clientX - cx, e.clientY - cy) || 1, a0: Math.atan2(e.clientY - cy, e.clientX - cx), size: t.size, stroke: t.strokeWidth, rot: t.rotation };
+});
+// Tracked on the window so the gesture keeps working wherever the pointer goes.
+addEventListener('pointermove', (e) => {
+  if (!drag?.handle) return;
+  if (drag.mode === 'scale') {
+    const f = Math.hypot(e.clientX - drag.cx, e.clientY - drag.cy) / drag.d0;
+    setText(selectedText, { size: clamp(Math.round(drag.size * f), 4, 400), strokeWidth: Math.round(drag.stroke * f * 2) / 2 });
+  } else {
+    let deg = drag.rot + ((Math.atan2(e.clientY - drag.cy, e.clientX - drag.cx) - drag.a0) * 180) / Math.PI;
+    if (e.shiftKey) deg = Math.round(deg / 15) * 15;
+    setText(selectedText, { rotation: Math.round(((deg + 540) % 360) - 180) });
+  }
+});
+addEventListener('pointerup', () => { if (drag?.handle) drag = null; });
+
+addEventListener('keydown', (e) => {
+  if (!selectedText || !current || /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName)) return;
+  const t = layerOf(current, selectedText);
+  if (!t) return;
+  const step = (e.shiftKey ? 10 : 1) / 512, nudge = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, step], ArrowDown: [0, -step] }[e.key];
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteLayer(t.id); }
+  else if (e.key === 'Escape') selectText(null);
+  else if (nudge) { e.preventDefault(); setText(t.id, { x: round3(clamp(t.x + nudge[0], -0.5, 0.5)), y: round3(clamp(t.y + nudge[1], -0.5, 0.5)) }); }
+});
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const wrap180 = (v) => Math.round(((v + 540) % 360) - 180);
 
@@ -375,18 +627,26 @@ for (const id of ['expSize', 'expFormat', 'expSS']) {
   $(id).onchange = () => store.set(id, $(id).value);
 }
 
-async function encode(file, { size, format, ss }) {
-  const img = draw(file, size, { out: 'pixels', supersample: ss });
-  const c = document.createElement('canvas'); c.width = c.height = size;
-  const g = c.getContext('2d');
-  if (format === 'jpeg') {
-    const tmp = document.createElement('canvas'); tmp.width = tmp.height = size;
-    tmp.getContext('2d').putImageData(img, 0, 0);
-    g.fillStyle = '#ffffff'; g.fillRect(0, 0, size, size); g.drawImage(tmp, 0, 0);
-  } else g.putImageData(img, 0, 0);
+function canvasOf(w, h, img = null) {
+  const c = Object.assign(document.createElement('canvas'), { width: w, height: h });
+  if (img) c.getContext('2d').putImageData(img, 0, 0);
+  return c;
+}
+async function canvasBytes(c, format = 'png') {
   const blob = await new Promise((res) => c.toBlob(res, 'image/' + format, 0.95));
-  requestPreview();
   return new Uint8Array(await blob.arrayBuffer());
+}
+
+async function encode(file, { size, format, ss }) {
+  await overlayReady(file.settings);
+  let c = canvasOf(size, size, draw(file, size, { out: 'pixels', supersample: ss }));
+  if (format === 'jpeg') {
+    const flat = canvasOf(size, size), g = flat.getContext('2d');
+    g.fillStyle = '#ffffff'; g.fillRect(0, 0, size, size); g.drawImage(c, 0, 0);
+    c = flat;
+  }
+  requestPreview();
+  return canvasBytes(c, format);
 }
 const baseName = (n) => n.replace(/\.[^.]+$/, '');
 
@@ -418,6 +678,152 @@ $('exportOne').onclick = async () => {
 };
 $('exportSel').onclick = () => exportFiles(files.filter((f) => f.checked));
 $('exportAll').onclick = () => exportFiles(files);
+
+// ---------------- animated export ----------------
+// Frames render at exact times through the same path as stills (pose, deterministic VFX/trails, post), never realtime.
+const yieldUI = () => new Promise((r) => setTimeout(r));
+const syncAnimDlg = () => { $('animDlg').dataset.format = $('axFormat').value; };
+for (const id of ['axScope', 'axFormat', 'axSource', 'axFps', 'axLoop', 'axLock', 'axCols', 'axPad', 'axGifBg', 'axGifColor']) {
+  const el = $(id), prop = el.type === 'checkbox' ? 'checked' : 'value', saved = store.get('ax:' + id, null);
+  if (saved != null) el[prop] = saved;
+  el.onchange = () => { store.set('ax:' + id, el[prop]); syncAnimDlg(); };
+}
+let axState = null; // { cancelled } while an export runs
+
+$('exportAnim').onclick = () => {
+  if (!current?.job) return status('Nothing to export');
+  $('axDuration').value = +(animEntry(current)?.track?.length || current.settings.vfx.duration).toFixed(3);
+  $('axStart').value = 0;
+  $('axProgressRow').hidden = true;
+  syncAnimDlg();
+  $('animDlg').showModal();
+};
+$('axCancel').onclick = () => { if (axState) axState.cancelled = true; else $('animDlg').close(); };
+$('animDlg').oncancel = (e) => { if (axState) { e.preventDefault(); axState.cancelled = true; } };
+$('axGo').onclick = () => exportAnimation();
+
+async function exportAnimation() {
+  const scope = $('axScope').value;
+  const list = (scope === 'current' ? [current] : scope === 'checked' ? files.filter((f) => f.checked) : files).filter((f) => f?.job);
+  if (!list.length) return status('Nothing ready to export');
+  const folder = await window.native.pickFolder();
+  if (!folder) return;
+  const o = { ...exportOpts(), format: $('axFormat').value, source: $('axSource').value,
+    fps: clamp(Math.round(+$('axFps').value || 24), 1, 60), start: Math.max(0, +$('axStart').value || 0), duration: Math.max(0.01, +$('axDuration').value || 1),
+    loop: $('axLoop').checked, lock: $('axLock').checked, cols: Math.max(0, Math.round(+$('axCols').value || 0)), pad: Math.max(0, Math.round(+$('axPad').value || 0)),
+    gifBg: $('axGifBg').value === 'solid' ? hexToVec3($('axGifColor').value).map((v) => v * 255) : null };
+  if (o.format === 'gif') o.size = Math.min(o.size, MAX_GIF_SIZE);
+  setPlaying(false); setAnimPlaying(false);
+  const saved = list.map((f) => [f, f.animTime, f.settings.vfx.time]);
+  axState = { cancelled: false };
+  $('axGo').disabled = true; $('axCancel').textContent = 'Cancel'; $('axProgressRow').hidden = false;
+  const used = new Set(), notes = [];
+  try {
+    for (const [k, f] of list.entries()) {
+      let name = baseName(f.name), n = 2;
+      while (used.has(name)) name = `${baseName(f.name)}_${n++}`;
+      used.add(name);
+      const note = await exportClip(f, o, folder, name, (i, total, what) => {
+        $('axProgress').value = (k + i / total) / list.length;
+        $('axProgressLabel').textContent = `${list.length > 1 ? `${f.name} (${k + 1}/${list.length}) · ` : ''}${what} ${i}/${total}`;
+      });
+      if (note) notes.push(note);
+      if (axState.cancelled) break;
+    }
+    status(axState.cancelled ? 'Animated export cancelled' : `Exported ${list.length} animation${list.length > 1 ? 's' : ''} to ${folder}${notes.length ? ' — ' + notes.join('; ') : ''}`);
+  } catch (e) {
+    console.error(e); status('Animated export failed: ' + e.message);
+  } finally {
+    for (const [f, animTime, vfxTime] of saved) { f.animTime = animTime; f.settings.vfx.time = vfxTime; }
+    axState = null;
+    $('axGo').disabled = false; $('axCancel').textContent = 'Close';
+    $('animDlg').close();
+    syncTimeline(); syncAnimBar(); requestPreview();
+  }
+}
+
+function gifWorker() {
+  const w = new Worker(new URL('./gif.worker.js', import.meta.url), { type: 'module' });
+  let wait = null;
+  w.onmessage = ({ data }) => (data.type === 'error' ? wait.reject(new Error(data.message)) : wait.resolve(data));
+  w.onerror = (e) => wait?.reject(new Error(e.message || 'GIF encoder failed'));
+  return {
+    call: (msg, transfer = []) => new Promise((resolve, reject) => { wait = { resolve, reject }; w.postMessage(msg, transfer); }),
+    terminate: () => w.terminate(),
+  };
+}
+
+// One file's clip. Frames stream to disk (or into the sheet / GIF encoder) instead of piling up in memory.
+// Returns a note for the status line, if any.
+async function exportClip(f, o, folder, name, progress) {
+  await overlayReady(f.settings);
+  const times = frameTimes(o.start, o.duration, o.fps, o.loop);
+  const at = (t) => { if (o.source !== 'vfx') f.animTime = t; if (o.source !== 'animation') f.settings.vfx.time = t; };
+  // Lock framing across the clip, so per-frame auto-fit doesn't make the model grow and shrink.
+  const fit = o.lock ? renderer.clipFit(f.job, f.settings, times, (t) => { at(t); prepare(f); }) : null;
+  const frame = (t, size = o.size, ss = o.ss) => { at(t); return draw(f, size, { out: 'pixels', supersample: ss, fit }); };
+  const write = async (file, bytes) => window.native.writeFile(await window.native.joinPath(folder, file), bytes);
+  let format = o.format, note = null;
+  const layout = format === 'sheet' ? sheetLayout(times.length, o.size, o.cols, o.pad) : null;
+  if (layout && !layout.fits) { format = 'png'; note = `${name}: a ${layout.width}×${layout.height} sheet is too large, wrote numbered PNGs`; }
+
+  if (format === 'png') {
+    const digits = Math.max(4, String(times.length - 1).length);
+    for (const [i, t] of times.entries()) {
+      if (axState?.cancelled) return note;
+      progress(i, times.length, 'Frame');
+      await write(`${name}_${String(i).padStart(digits, '0')}.png`, await canvasBytes(canvasOf(o.size, o.size, frame(t))));
+      await yieldUI();
+    }
+    return note;
+  }
+
+  if (format === 'sheet') {
+    const sheet = canvasOf(layout.width, layout.height), g = sheet.getContext('2d');
+    for (const [i, t] of times.entries()) {
+      if (axState?.cancelled) return note;
+      progress(i, times.length, 'Frame');
+      g.putImageData(frame(t), layout.frames[i].x, layout.frames[i].y);
+      await yieldUI();
+    }
+    progress(times.length, times.length, 'Saving');
+    await write(`${name}.png`, await canvasBytes(sheet));
+    const meta = { image: `${name}.png`, fps: o.fps, duration: o.duration, loop: o.loop, frameWidth: o.size, frameHeight: o.size,
+      columns: layout.cols, rows: layout.rows, padding: o.pad, frames: layout.frames.map((r, i) => ({ ...r, time: +times[i].toFixed(4) })) };
+    await write(`${name}.json`, new TextEncoder().encode(JSON.stringify(meta, null, 1)));
+    return note;
+  }
+
+  // GIF: one palette from a few evenly spaced frames, then frames encode in a worker while the next one renders.
+  const gif = gifWorker();
+  try {
+    const samples = [], picks = Math.min(times.length, 12);
+    for (let k = 0; k < picks; k++) {
+      if (axState?.cancelled) return note;
+      progress(k, picks, 'Palette');
+      const img = frame(times[Math.floor((k * times.length) / picks)], Math.min(o.size, 256), 1);
+      if (o.gifBg) flatten(img.data, o.gifBg);
+      opaqueSamples(img.data, 20000, samples);
+      await yieldUI();
+    }
+    await gif.call({ type: 'start', samples: new Uint8Array(samples), width: o.size, height: o.size, transparent: !o.gifBg, repeat: o.loop ? 0 : -1 });
+    const delays = gifDelays(times.length, o.fps);
+    let pending = null;
+    for (const [i, t] of times.entries()) {
+      if (axState?.cancelled) return note;
+      progress(i, times.length, 'Frame');
+      const img = frame(t);
+      if (o.gifBg) flatten(img.data, o.gifBg);
+      await pending;
+      pending = gif.call({ type: 'frame', pixels: img.data.buffer, delay: delays[i] }, [img.data.buffer]);
+      await yieldUI();
+    }
+    await pending;
+    progress(times.length, times.length, 'Encoding');
+    await write(`${name}.gif`, (await gif.call({ type: 'finish' })).bytes);
+  } finally { gif.terminate(); }
+  return note;
+}
 
 // ---------------- toolbar ----------------
 $('addBtn').onclick = () => $('fileInput').click();
@@ -534,7 +940,15 @@ let dragDepth = 0;
 addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; $('dropOverlay').hidden = false; });
 addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('dropOverlay').hidden = true; } });
 addEventListener('dragover', (e) => e.preventDefault());
-addEventListener('drop', (e) => { e.preventDefault(); dragDepth = 0; $('dropOverlay').hidden = true; addFiles([...e.dataTransfer.files]); });
+addEventListener('drop', async (e) => {
+  e.preventDefault(); dragDepth = 0; $('dropOverlay').hidden = true;
+  const dropped = [...e.dataTransfer.files], image = dropped.find((f) => f.type.startsWith('image/'));
+  addFiles(dropped.filter((f) => f !== image));
+  if (image && current) { // an image becomes the background of the current (or linked) files
+    const url = await imageDataUrl(image).catch((err) => status('Could not read image: ' + err.message));
+    if (url) { setValue('background', 'image', url); setValue('background', 'mode', 'image'); buildPanel(); status(`Background image: ${image.name}`); }
+  }
+});
 
 buildPanel();
 renderList();
@@ -552,4 +966,4 @@ renderList();
 }
 
 // Test hook: lets an automated harness load files and grab renders.
-window.__app = { addFiles, files, renderer, encode, select, loadAnimationId };
+window.__app = { addFiles, files, renderer, encode, select, loadAnimationId, exportClip };
