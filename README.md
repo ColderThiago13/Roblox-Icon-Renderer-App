@@ -36,8 +36,17 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 
 ## Features
 
+**Workspace, sessions and tray**
+- The **Workspace** panel (under the file list) shows the current file's instance tree with class icons. Select models (Ctrl+click or Shift+click for several) and drag them onto the file list: each becomes its own icon, rendering only that model and starting from the current settings.
+- Right-click anything in the Workspace to **Disable** it: it and everything under it leave the render, and its row turns grey with **(Disabled)**. Right-click again to enable it. Models dragged out keep the disabled state of their own children.
+- Open files, split-out models and their edits are saved automatically and reopened on the next launch.
+- **Discord activity**: while Discord is open, your profile shows Roblox Icon Renderer with the file you're editing.
+- **Settings** (gear in the toolbar): theme (Dark, Light, Midnight, Studio), accent color, interface size and launch animation; Discord activity on/off and what it shows (file name, open files, time); reopening files on launch, closing to the tray, automatic update checks; Roblox access and the asset cache.
+- **Hide to tray** sends the window to the Windows notification area (hidden icons); click the tray icon to bring it back, or right-click it to quit.
+
 **Model support**
 - Binary `.rbxm`: LZ4 and ZSTD chunks, SharedStrings, the new Content type. XML `.rbxmx`. `.obj` (including vertex colors).
+- Thin parts and flat meshes (cards, leaves, blades) render from both sides, and zero-thickness parts no longer turn black. MeshParts with `DoubleSided` render both sides too.
 - Parts: Block, Ball, Cylinder, Wedge and CornerWedge shapes; WedgePart, CornerWedgePart, MeshPart, SpecialMesh (FileMesh, Brick, Sphere, Cylinder, Head, Wedge), BlockMesh and CylinderMesh.
 - FileMesh versions 1.00 to 7.00, including Draco-compressed v7. Only the highest-detail LOD is drawn.
 - Materials: color, transparency, reflectance and material type (Neon glows through bloom; Glass, metals, ForceField).
@@ -56,7 +65,7 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 - PointLight, SpotLight and SurfaceLight. Highlight (fill plus a 2D outline).
 
 **Trails**
-- A separate **Trails** section controls visibility, **Length / motion cap (studs)**, lighting, framing, and inclusion in outlines/glow. **Show VFX** and **Show trails** work independently. Set length to zero to hide trails.
+- Trails are **off by default** (Trails → Show trails). A separate **Trails** section controls visibility, **Length / motion cap (studs)**, lighting, framing, and inclusion in outlines/glow. **Show VFX** and **Show trails** work independently. Set length to zero to hide trails.
 - **Auto** uses the selected rig animation's recent attachment motion, sampled at the chosen animation time. With no animation selected, it previews a straight trail sweeping behind the object (behind the HumanoidRootPart for characters, otherwise away from the model's center), always across the attachment edge so the ribbon shows its full width. **Direction** uses a straight trail along **Direction path: yaw/tilt** instead; **Animation** only shows actual animation motion.
 - Supports the file's Enabled, Lifetime, MinLength, MaxLength, WidthScale, Color, Transparency, FaceCamera, texture tiling/stretching, Brightness, LightEmission, and LightInfluence. The user length caps motion paths; the file's MaxLength can shorten them further. Previews, thumbnails, and exports use the same path. No past motion is shown at animation time zero.
 
@@ -77,6 +86,7 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 - Background: transparent, solid, linear/radial gradient, or **an image** (Choose… in the Background section, or drop an image on the preview). Fit (cover, contain, stretch, tile), scale, offset and rotation; Alt+drag moves it and Alt+wheel scales it on the preview. The image is stored with the settings, so profiles and copied settings carry it.
 
 **Text**
+- **Double-click a text on the preview to type right on it** (Enter or clicking away finishes, Shift+Enter adds a line). Side handles stretch the width or height alone; corner handles scale the whole text.
 - Any number of text layers per file (**Text** section → **+ Add text**), drawn over the model and background in preview, thumbnails and every export.
 - Fonts: Roblox Studio's own font families (Builder Sans, Luckiest Guy, Fredoka One, Bangers, Montserrat, Oswald, Press Start 2P, Creepster and more, read from your local Roblox install, with their real weights), then common Windows fonts.
 - Size, weight, italic, alignment, letter spacing, line height, opacity; fill and stroke each in **solid, gradient (any angle), radial or rainbow** color modes, stroke (width and color), drop shadow (blur, offset, color), rotation, and **curve** (bend the text along an arc, up or down; multi-line text curves around a shared center).
@@ -89,7 +99,7 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 - **Profiles** (top of the settings panel): save the current settings under a name and apply them to any file later. Profiles live in `%APPDATA%\roblox-icon-renderer\profiles.json`, so updates keep them.
 - Per-section **Apply to all**, Copy/Paste, **To all files**, and **Default** (settings new files start with).
 - Export the current file, the checked files or all files as PNG, WebP or JPEG at 256 to 4096 px, with optional 2× supersampling.
-- **Export animation…** renders a clip at exact frame times as a PNG sequence, a PNG sprite sheet with JSON frame data, or a GIF. Choose which clock advances (animation, VFX or both), start, duration, FPS and looping; framing is locked across the clip by default. Works for the current, checked or all files, with progress and Cancel. GIFs use one shared palette, 1-bit transparency or a solid background, and are capped at 1024 px.
+- **Export animation…** renders a clip at exact frame times as a PNG sequence, a PNG sprite sheet with JSON frame data, or a GIF. Choose the frame size (64–4096 px), which clock advances (animation, VFX or both), start, duration, FPS and looping; sprite sheets can instead be sized as a **whole sheet** (1024–16384 px) so FPS and duration only change how small each frame is; the dialog shows the grid, frame size and sheet size as you edit; framing is locked across the clip by default. Works for the current, checked or all files, with progress and Cancel. GIFs use one shared palette, 1-bit transparency or a solid background, and are capped at 1024 px.
 
 ## Known limitations
 

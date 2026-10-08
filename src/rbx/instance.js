@@ -12,7 +12,31 @@ export function* walk(list) {
   for (const inst of list) { yield inst; yield* walk(inst.children); }
 }
 
-export const nameOf = (inst) => inst.props.name ?? inst.className;
+// Path = child indexes from the file's top level down to one instance (stable across re-parses of the same bytes).
+export function pathOf(inst, roots) {
+  const path = [];
+  for (let i = inst; i; i = i.parent) path.unshift((i.parent?.children ?? roots).indexOf(i));
+  return path;
+}
+
+export function atPath(roots, path) {
+  let node = { children: roots };
+  for (const i of path) node = node?.children[i];
+  return node ?? null;
+}
+
+// What gets rendered: the instance at `path` (or the whole file) minus disabled instances and their descendants.
+// Disabled ones are cut out of `tree` itself, so pass a parse that doesn't need to stay whole.
+// Parents stay linked, so pivots/ancestors still resolve.
+export function renderTree(tree, path = null, disabled = []) {
+  const root = path && atPath(tree.roots, path);
+  if (path && !root) throw new Error('This model is no longer in the file');
+  const off = disabled.map((p) => atPath(tree.roots, p)).filter(Boolean); // resolve all first: cutting shifts indexes
+  for (const inst of off) { const list = inst.parent ? inst.parent.children : tree.roots; list.splice(list.indexOf(inst), 1); }
+  return finalizeTree(path ? (off.includes(root) ? [] : [root]) : tree.roots);
+}
+
+export const nameOf =(inst) => inst.props.name ?? inst.className;
 
 export function isA(inst, ...classes) { return classes.includes(inst.className); }
 

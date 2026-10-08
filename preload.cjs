@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
 contextBridge.exposeInMainWorld('native', {
   getAsset: (id) => ipcRenderer.invoke('asset:get', id),
@@ -18,4 +18,12 @@ contextBridge.exposeInMainWorld('native', {
   onUpdate: (cb) => ipcRenderer.on('update', (_e, msg) => cb(msg)),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
+  getSession: () => ipcRenderer.invoke('session:get'),
+  putSessionBlob: (key, data) => ipcRenderer.invoke('session:blob', key, data),
+  saveSession: (json) => ipcRenderer.sendSync('session:save', json),
+  hideToTray: () => ipcRenderer.invoke('win:tray'),
+  setActivity: (a) => ipcRenderer.send('discord:activity', a),
+  getPrefs: () => ipcRenderer.invoke('prefs:get'),
+  setPrefs: (p) => ipcRenderer.invoke('prefs:set', p),
+  setZoom: (f) => webFrame.setZoomFactor(f),
 });

@@ -48,6 +48,8 @@
     <span id="status"></span>
     <button id="updateBtn" class="update" hidden title="A newer version is available on GitHub"></button>
     <button id="credsBtn">Roblox access…</button>
+    <button id="trayBtn" class="iconBtn" title="Hide to tray: the window goes to the notification area (Windows hidden icons). Click the tray icon to bring it back."><i class="uiIco ui-tray"></i></button>
+    <button id="settingsBtn" class="iconBtn" title="Settings"><i class="uiIco ui-settings"></i></button>
   </header>
 
   <main>
@@ -58,10 +60,14 @@
       </div>
       <ul id="fileList"></ul>
       <div id="emptyHint" class="hint">Drop <b>.rbxm</b>, <b>.rbxmx</b> or <b>.obj</b> files anywhere</div>
+      <div id="workspace">
+        <div class="files-head"><span>Workspace</span><span class="ws-tip" title="Click, Ctrl+click or Shift+click to select; drag onto the file list to make each one its own icon">drag models to Files ↑</span></div>
+        <ul id="wsTree"></ul>
+      </div>
     </aside>
 
     <section id="stage">
-      <div id="viewport" class="bg-checker"><canvas id="view"></canvas><div id="textSel" hidden><i data-h="scale" class="nw"></i><i data-h="scale" class="ne"></i><i data-h="scale" class="sw"></i><i data-h="scale" class="se"></i><i data-h="rotate" class="rot" title="Rotate (Shift snaps)"></i></div></div>
+      <div id="viewport" class="bg-checker"><canvas id="view"></canvas><div id="textSel" hidden><i data-h="scale" class="nw"></i><i data-h="scale" class="ne"></i><i data-h="scale" class="sw"></i><i data-h="scale" class="se"></i><i data-h="rotate" class="rot" title="Rotate (Shift snaps)"></i><i data-h="sx" class="e" title="Stretch width"></i><i data-h="sx" class="w" title="Stretch width"></i><i data-h="sy" class="n" title="Stretch height"></i><i data-h="sy" class="s" title="Stretch height"></i></div><textarea id="textEdit" hidden spellcheck="false" rows="1"></textarea></div>
       <div id="timeline" hidden>
         <button id="playBtn" class="chip" title="Play / pause VFX (Space)">▶</button>
         <button id="restartBtn" class="chip" title="Back to start">⏮</button>
@@ -111,6 +117,12 @@
     </aside>
   </main>
 
+  <div id="ctxMenu" hidden></div>
+  <dialog id="settingsDlg">
+    <h2>Settings</h2>
+    <div class="setWrap"><nav id="setNav"></nav><div id="setBody"></div></div>
+    <div class="row"><button id="setReset" type="button">Reset to defaults</button><span class="grow"></span><button id="setDone" class="primary" type="button">Done</button></div>
+  </dialog>
   <div id="dropOverlay" hidden>Drop models to add them, or an image to use as the background</div>
 
   <dialog id="profileDlg">
@@ -152,6 +164,9 @@
         <label>Files <select id="axScope"><option value="current">Current file</option><option value="checked">Checked files</option><option value="all">All files</option></select></label>
         <label>Format <select id="axFormat"><option value="png">PNG sequence</option><option value="sheet">PNG sprite sheet + JSON</option><option value="gif">GIF</option></select></label>
         <label>Time source <select id="axSource" title="The rig animation and the VFX have separate clocks; choose which advance"><option value="both">Animation + VFX</option><option value="animation">Animation only</option><option value="vfx">VFX only</option></select></label>
+        <label class="sheetOnly">Size by <select id="axSizeBy" title="Frame: each frame has a fixed size and the sheet grows with the frame count. Whole sheet: the sheet has a fixed size and frames shrink to fit."><option value="frame">Frame size</option><option value="sheet">Whole sheet</option></select></label>
+        <label class="sheetOnly bySheet">Sheet size (px) <select id="axSheetSize"><option>1024</option><option>2048</option><option selected>4096</option><option>8192</option><option>16384</option></select></label>
+        <label class="byFrame">Frame size (px) <select id="axSize" title="Each frame is this many pixels square; sheets and PNG sequences can go up to 4096"><option>64</option><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option></select></label>
         <label>FPS <input id="axFps" type="number" min="1" max="60" step="1" value="24"></label>
         <label>Start (s) <input id="axStart" type="number" min="0" step="0.01" value="0"></label>
         <label>Duration (s) <input id="axDuration" type="number" min="0.05" step="0.01" value="2"></label>
@@ -162,7 +177,8 @@
         <label class="gifOnly">GIF background <select id="axGifBg"><option value="transparent">Transparent (1-bit edges)</option><option value="solid">Solid color</option></select></label>
         <label class="gifOnly">Color <input id="axGifColor" type="color" value="#2b2d42"></label>
       </div>
-      <p class="muted">Size and quality come from the toolbar. GIFs are limited to 256 colors and 1024 px; soft glows look best on a solid background or as PNG.</p>
+      <p id="axSheetInfo" class="sheetOnly"></p>
+      <p class="muted">Quality comes from the toolbar. GIFs are limited to 256 colors and 1024 px; soft glows look best on a solid background or as PNG.</p>
       <div id="axProgressRow" hidden><progress id="axProgress" max="1" value="0"></progress> <span id="axProgressLabel"></span></div>
       <div class="row"><span class="grow"></span><button id="axCancel" type="button">Close</button><button id="axGo" class="primary" type="button">Export…</button></div>
     </form>

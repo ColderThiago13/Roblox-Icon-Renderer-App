@@ -2,15 +2,17 @@
 import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { parseModel } from '../rbx/model.js';
+import { renderTree, atPath } from '../rbx/instance.js';
 import { buildScene } from './build.js';
 import { buildVfx } from './vfx.js';
 import { buildTrails, attachmentSample } from './trails.js';
 import { samplePoints, boundsOf, LAYER } from '../render/renderer.js';
 import { buildRig, fileAnimations } from './anim.js';
 
-export async function createJob(name, bytes, warn) {
+// path / disabled: render only that instance of the file, without the disabled ones (see renderTree).
+export async function createJob(name, bytes, warn, path = null, disabled = []) {
   let job;
-  if (/\.obj$/i.test(name)) {
+  if (!path && /\.obj$/i.test(name)) {
     const root = new OBJLoader().parse(new TextDecoder().decode(bytes));
     root.traverse((o) => {
       if (!o.isMesh) return;
@@ -21,10 +23,12 @@ export async function createJob(name, bytes, warn) {
     });
     job = { root, vfx: [], trails: [], lights: [], highlights: [], hlGroup: null, rig: null, animations: [] };
   } else {
-    const tree = parseModel(bytes);
+    const full = parseModel(bytes); // stays whole for the workspace panel
+    const tree = path || disabled.length ? renderTree(disabled.length ? parseModel(bytes) : full, path, disabled) : full;
     job = await buildScene(tree, warn);
     job.rig = buildRig(tree, job.partObjects, job.skinned);
     job.animations = job.rig ? fileAnimations(tree) : [];
+    job.tree = full; job.treeRoots = path ? [atPath(full.roots, path)] : full.roots;
   }
   job.points = samplePoints(job.root);
   if (!job.points.length) warn('Nothing visible to render in this file');

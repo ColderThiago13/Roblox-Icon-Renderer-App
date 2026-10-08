@@ -103,7 +103,7 @@ try {
   const trailSettings = { ...settings.trails, mode: 'direction', yaw: 90, length: 2 };
   job.trailSystem.update(trailSettings);
   job.trailPoints = new Float32Array(job.trailSystem.trails.flatMap(({ mesh }) => mesh.geometry.userData.boundsPoints));
-  settings.vfx.enabled = false;
+  settings.vfx.enabled = false; settings.trails.enabled = true;
   const on = render(job);
   settings.trails.enabled = false; const off = render(job);
   check(on.data.some((v, i) => v !== off.data[i]), 'Trails must render while Show VFX is off');

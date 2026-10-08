@@ -1,6 +1,8 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, net, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, protocol, net, safeStorage, shell, Tray, Menu, nativeImage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
+import { createConnection } from 'node:net';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import updaterPkg from 'electron-updater';
 
@@ -8,7 +10,7 @@ const { autoUpdater } = updaterPkg;
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 // Fixed data folder (config with the saved API key, asset cache, settings) so updates/renames never lose it.
-app.setPath('userData', path.join(app.getPath('appData'), 'roblox-icon-renderer'));
+app.setPath('userData', process.env.RIR_USER_DATA || path.join(app.getPath('appData'), 'roblox-icon-renderer')); // env: isolated test runs
 const CONFIG = () => path.join(app.getPath('userData'), 'config.json');
 const CACHE = () => path.join(app.getPath('userData'), 'asset-cache');
 
@@ -117,6 +119,40 @@ ipcMain.handle('profiles:set', async (_e, profiles) => {
   await fs.mkdir(path.dirname(PROFILES()), { recursive: true });
   await fs.writeFile(PROFILES(), JSON.stringify(profiles, null, 1));
 });
+// Open files survive restarts: session.json (names, settings, …) plus one <key>.bin per source file's bytes.
+const SESSION = () => path.join(app.getPath('userData'), 'session');
+const blobPath = (key) => {
+  if (!/^[a-z0-9]{1,40}$/i.test(String(key))) throw new Error('Bad session key');
+  return path.join(SESSION(), `${key}.bin`);
+};
+ipcMain.handle('session:get', async () => {
+  let s;
+  try { s = JSON.parse(await fs.readFile(path.join(SESSION(), 'session.json'), 'utf8')); } catch { return null; }
+  const keys = new Set(s.files.map((f) => f.src));
+  for (const f of await fs.readdir(SESSION())) if (f !== 'session.json' && !keys.has(f.replace(/\.bin$/, ''))) await fs.rm(path.join(SESSION(), f), { force: true });
+  s.blobs = {};
+  for (const k of keys) s.blobs[k] = await fs.readFile(blobPath(k)).catch(() => null);
+  return s;
+});
+ipcMain.handle('session:blob', async (_e, key, data) => {
+  const file = blobPath(key);
+  await fs.mkdir(SESSION(), { recursive: true });
+  if (await fs.stat(file).catch(() => null)) return;
+  await fs.writeFile(file + '.tmp', Buffer.from(data));
+  await fs.rename(file + '.tmp', file);
+});
+// Synchronous so it still completes while the window is closing. tmp + rename: a crash never leaves half a file.
+ipcMain.on('session:save', (e, json) => {
+  try {
+    fsSync.mkdirSync(SESSION(), { recursive: true });
+    const file = path.join(SESSION(), 'session.json');
+    fsSync.writeFileSync(file + '.tmp', json);
+    fsSync.renameSync(file + '.tmp', file);
+    e.returnValue = true;
+  } catch (err) { e.returnValue = err.message; }
+});
+ipcMain.handle('win:tray', (e) => BrowserWindow.fromWebContents(e.sender).hide());
+
 ipcMain.handle('cache:clear', () => fs.rm(CACHE(), { recursive: true, force: true }));
 ipcMain.handle('cache:open', async () => { await fs.mkdir(CACHE(), { recursive: true }); shell.openPath(CACHE()); });
 
@@ -139,6 +175,18 @@ ipcMain.handle('file:write', async (_e, filePath, data) => {
 });
 ipcMain.handle('file:join', (_e, ...parts) => path.join(...parts));
 
+// ---------- preferences (Settings dialog) ----------
+// The renderer owns the list and defaults (src/settings.js PREFS); main reads the ones it acts on.
+const PREFS = () => path.join(app.getPath('userData'), 'prefs.json');
+let prefs = {};
+ipcMain.handle('prefs:get', () => prefs);
+ipcMain.handle('prefs:set', async (_e, next) => {
+  prefs = { ...next };
+  await fs.mkdir(path.dirname(PREFS()), { recursive: true });
+  await fs.writeFile(PREFS(), JSON.stringify(prefs, null, 1));
+  if (prefs.discordActivity === false) discordClose(); else discordConnect();
+});
+
 // ---------- auto update (GitHub Releases) ----------
 // Checks on launch and hourly; the renderer only shows the Update button when a newer release exists.
 function setupUpdates(win) {
@@ -150,7 +198,7 @@ function setupUpdates(win) {
   autoUpdater.on('download-progress', (p) => send('progress', { percent: Math.round(p.percent) }));
   autoUpdater.on('update-downloaded', (info) => send('downloaded', { version: info.version }));
   autoUpdater.on('error', (e) => send('error', { message: String(e?.message || e).split('\n')[0] }));
-  const check = () => autoUpdater.checkForUpdates().catch(() => {});
+  const check = () => { if (prefs.autoUpdate !== false) autoUpdater.checkForUpdates().catch(() => {}); };
   win.webContents.once('did-finish-load', check);
   setInterval(check, 60 * 60 * 1000);
 }
@@ -158,7 +206,64 @@ ipcMain.handle('update:download', () => autoUpdater.downloadUpdate());
 ipcMain.handle('update:install', () => autoUpdater.quitAndInstall(true, true));
 ipcMain.handle('app:version', () => app.getVersion());
 
-app.whenReady().then(() => {
+// ---------- Discord activity ----------
+// Rich Presence over Discord's local IPC pipe (frames: int32 opcode, int32 length, JSON). Retries quietly while Discord is closed.
+// The client ID is a Discord application (discord.com/developers/applications); its name is what friends see you "playing".
+const DISCORD_CLIENT_ID = '1557549358738833428';
+const DISCORD_ICON = 'https://raw.githubusercontent.com/ColderThiago13/Roblox-Icon-Renderer-App/main/build/icon.png';
+let discord = null, activity = null, activityTimer = null;
+const discordStart = Date.now();
+function discordConnect() {
+  if (!DISCORD_CLIENT_ID || discord || prefs.discordActivity === false) return;
+  const sock = createConnection(String.raw`\\?\pipe\discord-ipc-0`);
+  const send = (op, data) => {
+    const body = Buffer.from(JSON.stringify(data)), head = Buffer.alloc(8);
+    head.writeInt32LE(op, 0); head.writeInt32LE(body.length, 4);
+    sock.write(Buffer.concat([head, body]));
+  };
+  discord = { send, sock, ready: false };
+  sock.on('connect', () => send(0, { v: 1, client_id: DISCORD_CLIENT_ID }));
+  sock.on('data', (buf) => {
+    const op = buf.readInt32LE(0), body = buf.subarray(8, 8 + buf.readInt32LE(4)).toString();
+    if (op === 3) send(4, JSON.parse(body)); // ping -> pong
+    else if (op === 2) sock.destroy(); // Discord closed the connection (e.g. unknown client ID)
+    else if (!discord.ready && body.includes('"READY"')) { discord.ready = true; pushActivity(); }
+  });
+  sock.on('error', () => {});
+  sock.on('close', () => { discord = null; });
+}
+// Turning the setting off clears the status and drops the connection (Discord removes it when the pipe closes).
+function discordClose() { discord?.sock.destroy(); discord = null; }
+function pushActivity() {
+  if (!discord?.ready || !activity) return;
+  const { details, state, showTime } = activity;
+  discord.send(1, { cmd: 'SET_ACTIVITY', nonce: String(Date.now()), args: { pid: process.pid, activity: {
+    details, ...(state && { state }), ...(showTime && { timestamps: { start: discordStart } }),
+    assets: { large_image: DISCORD_ICON, large_text: 'Roblox Icon Renderer' } } } });
+}
+// Discord allows about 5 updates per 20 s, so changes are batched. Texts must be 2-128 characters.
+ipcMain.on('discord:activity', (_e, a) => {
+  const text = (v) => { const s = String(v ?? '').slice(0, 128); return s.trim().length >= 2 ? s : ''; };
+  const next = { details: text(a?.details) || 'Roblox Icon Renderer', state: text(a?.state), showTime: a?.showTime !== false };
+  if (JSON.stringify(next) === JSON.stringify(activity)) return;
+  activity = next;
+  clearTimeout(activityTimer);
+  activityTimer = setTimeout(pushActivity, 4000);
+});
+
+// One instance: launching again (e.g. while hidden in the tray) brings the existing window back.
+let mainWin = null, tray = null;
+const showWindow = () => { if (!mainWin) return; mainWin.show(); if (mainWin.isMinimized()) mainWin.restore(); mainWin.focus(); };
+if (!process.env.RIR_TEST_FILES && !app.requestSingleInstanceLock()) app.exit(0);
+// Test runs: keep animating when other windows cover this one (the splash only clears after a frame).
+if (process.env.RIR_TEST_FILES) app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+app.on('second-instance', showWindow);
+
+let quitting = false;
+app.on('before-quit', () => { quitting = true; });
+
+app.whenReady().then(async () => {
+  try { prefs = JSON.parse(await fs.readFile(PREFS(), 'utf8')); } catch { /* defaults */ }
   protocol.handle('app', (req) => {
     const rel = decodeURIComponent(new URL(req.url).pathname);
     const file = path.normalize(path.join(ROOT, rel));
@@ -177,7 +282,15 @@ app.whenReady().then(() => {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (e) => e.preventDefault());
   win.loadURL('app://local/index.html');
+  mainWin = win;
+  win.on('close', (e) => { if (prefs.closeToTray && !quitting) { e.preventDefault(); win.hide(); } }); // tray menu / updates still quit
+  // Always in the notification area ("hidden icons"); the toolbar's tray button hides the window there.
+  tray = new Tray(nativeImage.createFromPath(path.join(ROOT, 'build', 'icon.png')).resize({ width: 16, height: 16 }));
+  tray.setToolTip('Roblox Icon Renderer');
+  tray.on('click', showWindow);
+  tray.setContextMenu(Menu.buildFromTemplate([{ label: 'Show Roblox Icon Renderer', click: showWindow }, { type: 'separator' }, { label: 'Quit', click: () => app.quit() }]));
   setupUpdates(win);
+  if (!process.env.RIR_TEST_FILES) { discordConnect(); setInterval(discordConnect, 15000); }
   if (process.env.RIR_DEVTOOLS) win.webContents.openDevTools({ mode: 'detach' });
   if (process.env.RIR_TEST_FILES) win.webContents.once('did-finish-load', () => renderTest(win));
 });
@@ -194,6 +307,8 @@ async function renderTest(win) {
   }
   const results = await win.webContents.executeJavaScript(`(async () => {
     const app = window.__app;
+    await app.sessionRestored;
+    console.log('session restored: ' + JSON.stringify(app.files.map((f) => f.name)));
     const input = ${JSON.stringify(files)}.map((f) => new File([Uint8Array.from(atob(f.b64), (c) => c.charCodeAt(0))], f.name));
     await app.addFiles(input);
     while (app.files.some((f) => f.status === 'loading')) await new Promise((r) => setTimeout(r, 100));
@@ -241,9 +356,92 @@ async function renderTest(win) {
     console.log(`${r.name}: ok${r.warnings.length ? ' — ' + r.warnings.join(' | ') : ''}${r.anims.length ? ' | animations: ' + r.anims.join(', ') : ''}`);
   }
   await new Promise((r) => setTimeout(r, 1500));
+  const js = (code) => win.webContents.executeJavaScript(code);
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const mouse = (type, [x, y], modifiers = []) => win.webContents.sendInputEvent({ type, x: Math.round(x), y: Math.round(y), button: 'left', clickCount: 1, modifiers });
+  const click = async (at, modifiers) => { mouse('mouseMove', at, modifiers); await wait(80); mouse('mouseDown', at, modifiers); await wait(80); mouse('mouseUp', at, modifiers); await wait(150); };
+  const centerOf = (sel) => js(`(() => { const r = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return [r.left + Math.min(60, r.width / 2), r.top + r.height / 2]; })()`);
+  // RIR_TEST_WORKSPACE=1: real mouse in the workspace tree. Click row 2, Ctrl+click row 4, drag both onto the file list.
+  if (process.env.RIR_TEST_WORKSPACE) {
+    win.focus(); win.webContents.focus();
+    for (let i = 0; i < 100 && await js(`!!document.getElementById('splash')`); i++) await wait(100);
+    await js('window.__app.select(window.__app.files.find((f) => f.job?.treeRoots))');
+    await wait(500);
+    const before = await js('window.__app.files.length');
+    const a = await centerOf('#wsTree li[data-i="2"]'), b = await centerOf('#wsTree li[data-i="4"]'), target = await centerOf('#fileList');
+    await click(a); await click(b, ['control']);
+    console.log('workspace selected:', await js(`[...document.querySelectorAll('#wsTree li.sel .name')].map((e) => e.textContent).join(', ')`));
+    mouse('mouseMove', a); await wait(80); mouse('mouseDown', a); await wait(80);
+    for (let i = 1; i <= 12; i++) { mouse('mouseMove', [a[0] + ((target[0] - a[0]) * i) / 12, a[1] + ((target[1] - a[1]) * i) / 12], ['leftButtonDown']); await wait(40); }
+    console.log('drop target highlighted:', await js(`document.getElementById('fileList').classList.contains('dropTarget')`), '| ghost:', await js(`document.getElementById('wsGhost')?.textContent ?? null`));
+    mouse('mouseUp', target); await wait(200);
+    await js('(async () => { while (window.__app.files.some((f) => f.status === "loading")) await new Promise((r) => setTimeout(r, 100)); })()');
+    const added = await js(`window.__app.files.slice(${before}).map((f) => ({ name: f.name, path: f.path, status: f.status, points: f.job?.points.length ?? 0 }))`);
+    console.log('workspace split out:', JSON.stringify(added));
+    for (const [i, f] of added.entries()) {
+      const png = await js(`window.__app.encode(window.__app.files[${before + i}], { size: 256, format: 'png', ss: 1 }).then(Array.from)`);
+      await fs.writeFile(path.join(out, `split-${i}-${f.name}.png`), Buffer.from(png));
+    }
+    const idle = () => js('(async () => { while (window.__app.files.some((f) => f.status === "loading")) await new Promise((r) => setTimeout(r, 100)); })()');
+    const rightClick = async (at) => { for (const type of ['mouseDown', 'mouseUp']) { win.webContents.sendInputEvent({ type, x: Math.round(at[0]), y: Math.round(at[1]), button: 'right', clickCount: 1 }); await wait(80); } await wait(150); };
+    // Right-click Base (row 1) -> Disable: it leaves the render and its row says (Disabled).
+    await js('window.__app.select(window.__app.files[0])'); await wait(500);
+    const pts0 = await js('window.__app.files[0].job.points.length');
+    await rightClick(await centerOf('#wsTree li[data-i="1"]'));
+    console.log('context menu:', await js(`document.getElementById('ctxMenu').hidden ? null : document.getElementById('ctxMenu').textContent`));
+    await click(await centerOf('#ctxMenu button')); await wait(300); await idle(); await wait(300);
+    console.log('disabled:', await js(`JSON.stringify({ disabled: window.__app.files[0].disabled, row: document.querySelector('#wsTree li.off .name')?.textContent, tag: document.querySelector('#wsTree li.off .offTag')?.textContent, points: window.__app.files[0].job.points.length })`), 'points before', pts0);
+    await fs.writeFile(path.join(out, 'disabled-base.png'), Buffer.from(await js(`window.__app.encode(window.__app.files[0], { size: 256, format: 'png', ss: 1 }).then(Array.from)`)));
+    // Text: add one, double-click it on the preview, type, Enter; then stretch it with the right side handle.
+    await js(`(() => { const d = document.getElementById('textSection'); d.open = true; d.querySelector('.addText').scrollIntoView(); })()`); await wait(300);
+    await click(await centerOf('#textSection .addText')); await wait(1200);
+    const textAt = await js(`(() => { const r = document.getElementById('textSel').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+    mouse('mouseMove', textAt); await wait(80);
+    for (const clickCount of [1, 2]) for (const type of ['mouseDown', 'mouseUp']) { win.webContents.sendInputEvent({ type, x: Math.round(textAt[0]), y: Math.round(textAt[1]), button: 'left', clickCount }); await wait(60); }
+    await wait(300);
+    win.webContents.insertText('Sword'); await wait(800);
+    console.log('inline edit:', await js(`JSON.stringify({ open: !document.getElementById('textEdit').hidden, focused: document.activeElement?.id, text: window.__app.files[0].settings.texts.at(-1).text, panel: document.querySelector('#textSection .field[data-key="text.text"] textarea')?.value })`));
+    await fs.writeFile(path.join(out, 'text-editing.png'), (await win.webContents.capturePage()).toPNG());
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' }); await wait(300);
+    console.log('after Enter, editor open:', await js(`!document.getElementById('textEdit').hidden`));
+    const east = await js(`(() => { const r = document.querySelector('#textSel .e').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+    mouse('mouseMove', east); await wait(80); mouse('mouseDown', east); await wait(80);
+    for (let i = 1; i <= 8; i++) { mouse('mouseMove', [east[0] + i * 10, east[1]], ['leftButtonDown']); await wait(40); }
+    mouse('mouseUp', [east[0] + 80, east[1]]); await wait(500);
+    console.log('side stretch:', await js(`JSON.stringify((({ scaleX, scaleY, size }) => ({ scaleX, scaleY, size }))(window.__app.files[0].settings.texts.at(-1)))`));
+    await fs.writeFile(path.join(out, 'text-stretched.png'), Buffer.from(await js(`window.__app.encode(window.__app.files[0], { size: 256, format: 'png', ss: 1 }).then(Array.from)`)));
+    // Animation dialog: sheet sized as a whole stays 2048 px whatever the FPS; frames shrink to fit.
+    await click(await centerOf('#exportAnim')); await wait(300);
+    const setDlg = (vals) => js(`(() => { for (const [id, v] of Object.entries(${JSON.stringify(vals)})) { const e = document.getElementById(id); e.value = v; e.dispatchEvent(new Event('change')); e.dispatchEvent(new Event('input')); } return document.getElementById('axSheetInfo').textContent; })()`);
+    console.log('sheet 24fps:', await setDlg({ axFormat: 'sheet', axSizeBy: 'sheet', axSheetSize: '2048', axFps: '24', axDuration: '2', axPad: '0', axCols: '0' }));
+    console.log('sheet 60fps:', await setDlg({ axFps: '60' }));
+    console.log('frame-size input hidden:', await js(`getComputedStyle(document.getElementById('axSize').closest('label')).display === 'none'`));
+    const plan = await js(`(() => { const p = window.__app.sheetPlan(); return { size: p.size, sheet: p.sheet }; })()`);
+    await js(`window.__app.exportClip(window.__app.files[0], { size: ${plan.size}, sheet: ${plan.sheet}, ss: 1, format: 'sheet', source: 'both', fps: 60, start: 0, duration: 2, loop: true, lock: true, cols: 0, pad: 0, gifBg: null }, ${JSON.stringify(out)}, 'wholesheet', () => {})`);
+    await setDlg({ axFps: '24', axSizeBy: 'frame' });
+    await click(await centerOf('#axCancel')); await wait(300);
+    // Settings: real click on the gear, switch to the light theme, turn Discord activity off with a real click.
+    await click(await centerOf('#settingsBtn')); await wait(400);
+    await fs.writeFile(path.join(out, 'settings-dark.png'), (await win.webContents.capturePage()).toPNG());
+    await js(`(() => { const s = document.querySelector('#setBody [data-key="pref.theme"] select'); s.value = 'light'; s.dispatchEvent(new Event('change')); })()`); await wait(300);
+    await click(await centerOf('#setNav button:nth-child(2)')); await wait(300);
+    await click(await js(`(() => { const r = document.querySelector('#setBody [data-key="pref.discordActivity"] input').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`)); await wait(500);
+    await fs.writeFile(path.join(out, 'settings-light.png'), (await win.webContents.capturePage()).toPNG());
+    console.log('settings:', await js(`document.documentElement.dataset.theme`), JSON.stringify(JSON.parse(await fs.readFile(path.join(app.getPath('userData'), 'prefs.json'), 'utf8'))));
+    await click(await centerOf('#setDone')); await wait(300);
+    prefs.closeToTray = true; win.close(); await wait(400);
+    console.log('close-to-tray: window kept', !win.isDestroyed(), '| hidden', !win.isVisible());
+    prefs.closeToTray = false; win.show(); await wait(400);
+    await fs.writeFile(path.join(out, 'light-app.png'), (await win.webContents.capturePage()).toPNG());
+    await js(`window.__app.select(window.__app.files[${before}])`); await wait(800);
+    await js('window.native.hideToTray()'); await wait(300);
+    const hidden = !win.isVisible();
+    tray.emit('click'); await wait(300);
+    console.log('tray: hidden', hidden, '| shown again', win.isVisible());
+    await js('window.__app.files[0].settings.camera.yaw = 77'); // must reach the session through the save on close
+  }
   // RIR_TEST_DRAG="x0,y0,x1,y1" (0..1 of the preview): real mouse drag of a text, then of its rotate handle.
   if (process.env.RIR_TEST_DRAG) {
-    const js = (code) => win.webContents.executeJavaScript(code);
     win.focus(); win.webContents.focus();
     for (let i = 0; i < 100 && await js(`!!document.getElementById('splash')`); i++) await new Promise((r) => setTimeout(r, 100)); // splash covers the window
     await js('window.__app.select(window.__app.files[0])'); // fresh preview (and text layout) after the edits above
@@ -256,9 +454,7 @@ async function renderTest(win) {
       if (next.join() === [left, top, size].join()) break;
       [left, top, size] = next;
     }
-    const mouse = (type, [x, y]) => win.webContents.sendInputEvent({ type, x: Math.round(x), y: Math.round(y), button: 'left', clickCount: 1 });
     const drag = async (from, to) => {
-      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
       mouse('mouseMove', from); await wait(100); mouse('mouseDown', from); await wait(100);
       for (let i = 1; i <= 10; i++) { mouse('mouseMove', [from[0] + ((to[0] - from[0]) * i) / 10, from[1] + ((to[1] - from[1]) * i) / 10]); await new Promise((r) => setTimeout(r, 30)); }
       mouse('mouseUp', to);

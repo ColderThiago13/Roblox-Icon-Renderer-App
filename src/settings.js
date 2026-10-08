@@ -34,7 +34,7 @@ export const SCHEMA = [
     r('maxParticles', 'Max particles / emitter', 100, 20000, 100, 20000), b('outlineVfx', 'Outline/glow includes VFX', false),
   ] },
   { id: 'trails', title: 'Trails', fields: [
-    b('enabled', 'Show trails', true), r('length', 'Length / motion cap (studs)', 0, 100, 0.05, 4),
+    b('enabled', 'Show trails', false), r('length', 'Length / motion cap (studs)', 0, 100, 0.05, 4),
     s('mode', 'Path', ['auto', 'direction', 'animation'], 'auto'),
     r('yaw', 'Direction path: yaw', -180, 180, 1, 180), r('pitch', 'Direction path: tilt', -89, 89, 1, 0),
     r('litLight', 'Scene light for lit trails', 0, 5, 0.05, 2),
@@ -80,7 +80,7 @@ export const FILLS = ['solid', 'gradient', 'radial', 'rainbow'];
 export const TEXT_FIELDS = [
   { key: 'text', label: 'Text', type: 'textarea', def: 'Text' }, { key: 'font', label: 'Font', type: 'font', def: 'Builder Sans' },
   { key: 'weight', label: 'Weight', type: 'weight', def: 800 }, b('italic', 'Italic', false),
-  r('size', 'Size (px)', 4, 400, 1, 64), s('align', 'Align', ['center', 'left', 'right'], 'center'),
+  r('size', 'Size (px)', 4, 400, 1, 64), r('scaleX', 'Width stretch', 0.1, 5, 0.01, 1), r('scaleY', 'Height stretch', 0.1, 5, 0.01, 1), s('align', 'Align', ['center', 'left', 'right'], 'center'),
   r('spacing', 'Letter spacing (px)', -20, 100, 0.5, 0), r('lineHeight', 'Line height', 0.6, 3, 0.01, 1.1),
   s('fill', 'Fill', FILLS, 'solid'), c('color', 'Color', '#ffffff'), c('color2', 'Color 2 (gradient)', '#ffd166'),
   r('fillAngle', 'Gradient / rainbow angle', 0, 360, 1, 90), r('opacity', 'Opacity', 0, 1, 0.01, 1),
@@ -117,3 +117,26 @@ export const hexToVec3 = (hex) => {
   const n = parseInt(hex.slice(1), 16);
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
 };
+
+// ---------- app preferences (Settings dialog), stored in userData/prefs.json ----------
+export const PREFS = [
+  { id: 'appearance', title: 'Appearance', icon: 'appearance', fields: [
+    { key: 'theme', label: 'Theme', type: 'select', options: ['dark', 'light', 'midnight', 'studio'], def: 'dark' },
+    { key: 'accent', label: 'Accent color', type: 'color', def: '#5b8cff' },
+    { key: 'uiScale', label: 'Interface size', type: 'select', options: ['90%', '100%', '110%', '125%'], def: '100%' },
+    { key: 'splash', label: 'Launch animation', type: 'bool', def: true },
+  ] },
+  { id: 'activity', title: 'Discord activity', icon: 'activity', hint: 'While the Discord desktop app is open, your profile shows "Playing Roblox Icon Renderer".', fields: [
+    { key: 'discordActivity', label: 'Show activity on Discord', type: 'bool', def: true },
+    { key: 'discordFile', label: 'Show the file name', type: 'bool', def: true },
+    { key: 'discordCount', label: 'Show how many files are open', type: 'bool', def: true },
+    { key: 'discordTime', label: 'Show time elapsed', type: 'bool', def: true },
+  ] },
+  { id: 'behavior', title: 'Behavior', icon: 'behavior', fields: [
+    { key: 'restoreSession', label: 'Reopen files from last time', type: 'bool', def: true },
+    { key: 'closeToTray', label: 'Closing the window hides it to the tray', type: 'bool', def: false },
+    { key: 'autoUpdate', label: 'Check for updates automatically', type: 'bool', def: true },
+  ] },
+  { id: 'access', title: 'Roblox access', icon: 'key', hint: 'An API key or cookie lets the app download meshes and textures referenced by your files.', fields: [] },
+];
+export const prefsWithDefaults = (saved) => ({ ...Object.fromEntries(PREFS.flatMap((s) => s.fields).map((f) => [f.key, f.def])), ...saved });

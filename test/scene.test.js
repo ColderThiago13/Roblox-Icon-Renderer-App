@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { makeInstance, finalizeTree } from '../src/rbx/instance.js';
+import { makeInstance, finalizeTree, pathOf, renderTree } from '../src/rbx/instance.js';
 import { brickColor } from '../src/rbx/brickcolor.js';
 import { defaultSettings, withDefaults, textLayer } from '../src/settings.js';
 import { layoutText, frameLayout, hitText } from '../src/render/overlay.js';
@@ -9,17 +9,19 @@ import { collectAppearances, clothingGeometry, clothingRect, chamferedLimb } fro
 import { buildScene, projectedDecalGeometry } from '../src/scene/build.js';
 import { buildRig } from '../src/scene/anim.js';
 import { buildTrails, clipTrail, directionalHistory, trailGeometry, behindDirection } from '../src/scene/trails.js';
-import { frameTimes, gifDelays, sheetLayout, flatten } from '../src/ui/animexport.js';
+import { frameTimes, gifDelays, sheetLayout, flatten, frameSizeForSheet } from '../src/ui/animexport.js';
 import { setPose, updateTrails } from '../src/scene/job.js';
 
 const settings = defaultSettings();
+settings.trails.enabled = true; // off by default; the trail tests below exercise them
 assert.ok(Math.abs(wheelZoom(1, { deltaY: 100, ctrlKey: true }) - 1) < Math.abs(wheelZoom(1, { deltaY: 100 }) - 1) / 9);
 assert.equal(wheelZoom(0.0101, { deltaY: 10, ctrlKey: true }), 0.0101);
 assert.equal(wheelZoom(0.01, { deltaY: 1000 }), 0.01);
 assert.equal(wheelZoom(4, { deltaY: -1000 }), 4);
 assert.equal(wheelZoom(1, { deltaY: 3, deltaMode: 1 }), wheelZoom(1, { deltaY: 48, deltaMode: 0 }));
 assert.ok(wheelZoom(0.2, { deltaY: 100 }) < 0.2);
-assert.equal(withDefaults({ vfx: { enabled: false } }).trails.enabled, true);
+assert.equal(withDefaults({ vfx: { enabled: false } }).trails.enabled, false, 'trails start off');
+assert.equal(withDefaults({ trails: { enabled: true } }).trails.enabled, true, 'saved settings keep trails on');
 assert.deepEqual(brickColor(21), { r: 196/255, g: 40/255, b: 28/255 });
 assert.equal(brickColor(99999), null);
 
@@ -29,6 +31,23 @@ function inst(cls, name, parent = null, props = {}) {
   return i;
 }
 const cf = (x = 0, y = 0, z = 0) => ({ p: [x,y,z], r: [1,0,0,0,1,0,0,0,1] });
+{ // workspace split-out: a path picks one instance of the file, and re-resolves it in a fresh parse
+  const a = inst('Model', 'A'), b = inst('Model', 'B'), sword = inst('Part', 'Sword', b), gem = inst('Part', 'Gem', b);
+  const tree = finalizeTree([a, b]);
+  assert.deepEqual(pathOf(gem, tree.roots), [1, 1]);
+  assert.deepEqual(pathOf(a, tree.roots), [0]);
+  const sub = renderTree(tree, [1, 1]);
+  assert.deepEqual(sub.roots, [gem]);
+  assert.deepEqual(renderTree(tree, [1]).all, [b, sword, gem]);
+  assert.equal(gem.parent, b, 'parents stay linked');
+  assert.throws(() => renderTree(tree, [1, 5]), /no longer/);
+  // disabled paths resolve before anything is cut, so [1,0] and [1,1] both go even though [1,0] shifts [1,1]
+  const c = inst('Model', 'C'), hilt = inst('Part', 'Hilt', c), blade = inst('Part', 'Blade', c), tip = inst('Part', 'Tip', blade);
+  assert.deepEqual(renderTree(finalizeTree([c]), null, [[0, 1]]).all, [c, hilt], 'disabled takes its descendants (Tip) along');
+  const d = inst('Model', 'D'); inst('Part', 'P0', d); inst('Part', 'P1', d); const p2 = inst('Part', 'P2', d);
+  assert.deepEqual(renderTree(finalizeTree([d]), null, [[0, 0], [0, 1]]).all, [d, p2]);
+  assert.deepEqual(renderTree(finalizeTree([d]), [0], [[0]]).roots, [], 'disabling the split-out root leaves nothing');
+}
 const rig1 = inst('Model', 'Rig1'), rig2 = inst('Model', 'Rig2');
 const body = inst('Part', 'Torso', rig1, { size: { x: 2, y: 2, z: 1 }, cframe: cf() });
 const other = inst('Part', 'Torso', rig2, { size: { x: 2, y: 2, z: 1 }, cframe: cf(6) });
@@ -118,6 +137,14 @@ const headRig = inst('Model', 'R6');
 const head = inst('Part', 'Head', headRig, { size: { x: 2, y: 1, z: 1 }, cframe: cf() });
 inst('SpecialMesh', 'Mesh', head, { meshtype: 0, scale: { x: 1.25, y: 1.25, z: 1.25 } });
 const headJob = await buildScene(finalizeTree([headRig]), () => {});
+{ // thin parts render from both sides; a zero-thickness part keeps usable normals instead of turning black
+  const thinM = inst('Model', 'Thin'), zero = inst('Part', 'Zero', thinM, { size: { x: 4, y: 0, z: 4 }, cframe: cf() }), cube = inst('Part', 'Cube', thinM, { size: { x: 2, y: 2, z: 2 }, cframe: cf(5) });
+  const tj = await buildScene(finalizeTree([thinM]), () => {});
+  const meshOf = (p) => tj.partObjects.get(p).children.find((o) => o.isMesh);
+  assert.ok(meshOf(zero).scale.y > 0, 'zero thickness is clamped');
+  assert.equal(meshOf(zero).material.side, THREE.DoubleSide);
+  assert.equal(meshOf(cube).material.side, THREE.FrontSide, 'solid parts stay single-sided');
+}
 const headMesh = headJob.partObjects.get(head).children[0];
 assert.deepEqual(headMesh.scale.toArray(), [1.25, 1.25, 1.25]);
 // A face decal is projected onto the front of the mesh, inside the [0,1] texture.
@@ -184,4 +211,18 @@ const small = textLayer({ id: 'r', text: 'ABCD', x: 0.1, y: 0.2, rotation: 90, s
 const L = frameLayout(small, layoutText(small, 512, measure), 512);
 assert.equal(hitText([L], 0.6, 0.3 + 0.03), 'r', 'rotated 90°: the long side runs vertically');
 assert.equal(hitText([L], 0.6 + 0.03, 0.3), null);
+{ // side handles stretch one axis around the anchor: hit box follows
+  const wide = textLayer({ id: 'w', text: 'ABCD', x: 0, y: 0, size: 10, strokeWidth: 0, scaleX: 2, scaleY: 0.5 });
+  const plain = frameLayout({ ...wide, scaleX: 1, scaleY: 1 }, layoutText(wide, 512, measure), 512), W = frameLayout(wide, layoutText(wide, 512, measure), 512);
+  assert.ok(Math.abs((W.box[2] - W.box[0]) - 2 * (plain.box[2] - plain.box[0])) < 1e-9);
+  assert.ok(Math.abs((W.box[3] - W.box[1]) - 0.5 * (plain.box[3] - plain.box[1])) < 1e-9);
+  assert.equal(hitText([W], 0.5 + plain.box[2] * 1.5, 0.5), 'w', 'stretched width is hittable');
+  assert.equal(textLayer().scaleX, 1);
+}
+{ // sheet sized as a whole: frames shrink to fit, the sheet stays put
+  assert.equal(frameSizeForSheet(48, 4096), 585); // 7 x 7 grid
+  assert.equal(frameSizeForSheet(12, 4096), 1024); // 4 x 3 grid, limited by width
+  assert.equal(frameSizeForSheet(12, 4096, 2, 4), 679); // 2 x 6 grid, limited by height: (4096 - 5 * 4) / 6
+  for (const n of [1, 7, 48, 120, 1200]) { const f = frameSizeForSheet(n, 2048, 0, 2), L = sheetLayout(n, f, 0, 2); assert.ok(L.width <= 2048 && L.height <= 2048, `${n} frames fit`); }
+}
 console.log('scene, appearance, classic R6, trails, zoom, head/decal, text layout, animated export ok');

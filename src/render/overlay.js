@@ -40,8 +40,10 @@ export function layoutText(t, S, measure) {
 }
 
 // Layout in normalized frame coordinates (0..1, y down) for hit testing and the selection box.
+// The width/height stretch applies after layout, around the anchor.
 export function frameLayout(t, layout, S) {
-  return { id: t.id, cx: 0.5 + t.x, cy: 0.5 - t.y, rot: rad(t.rotation), box: layout.box.map((v) => v / S) };
+  const sx = t.scaleX ?? 1, sy = t.scaleY ?? 1, [x0, y0, x1, y1] = layout.box;
+  return { id: t.id, cx: 0.5 + t.x, cy: 0.5 - t.y, rot: rad(t.rotation), box: [x0 * sx / S, y0 * sy / S, x1 * sx / S, y1 * sy / S] };
 }
 
 // Topmost layer under the normalized point, or null.
@@ -73,6 +75,7 @@ export function drawTexts(ctx, texts, S) {
     if (!L.glyphs.length) continue;
     g.translate((0.5 + t.x) * S, (0.5 - t.y) * S);
     g.rotate(rad(t.rotation));
+    g.scale(t.scaleX ?? 1, t.scaleY ?? 1);
     g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineJoin = 'round'; g.miterLimit = 2;
     g.lineWidth = Math.max(0, t.strokeWidth) * k * 2; // centered stroke; the fill covers the inner half
     for (const pass of t.strokeWidth > 0 ? ['strokeText', 'fillText'] : ['fillText']) {

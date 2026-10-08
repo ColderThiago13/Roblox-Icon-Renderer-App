@@ -2,11 +2,11 @@ import { IconRenderer } from '../render/renderer.js';
 import { createJob, updateVfx, updateTrails, setPose } from '../scene/job.js';
 import { wheelZoom } from './zoom.js';
 import { loadAnimationId } from '../scene/anim.js';
-import { assetId } from '../rbx/instance.js';
+import { assetId, nameOf, pathOf, atPath } from '../rbx/instance.js';
 import { clearMemoryCache } from '../scene/assets.js';
-import { SCHEMA, TEXT_FIELDS, textLayer, defaultSettings, withDefaults, clone, hexToVec3 } from '../settings.js';
-import { hitText, fontFamilies, loadFamily, overlayPending, overlayReady } from '../render/overlay.js';
-import { frameTimes, gifDelays, sheetLayout, flatten, opaqueSamples, MAX_GIF_SIZE } from './animexport.js';
+import { SCHEMA, TEXT_FIELDS, textLayer, defaultSettings, withDefaults, clone, hexToVec3, PREFS, prefsWithDefaults } from '../settings.js';
+import { hitText, fontFamilies, loadFamily, overlayPending, overlayReady, fontString } from '../render/overlay.js';
+import { frameTimes, gifDelays, sheetLayout, flatten, opaqueSamples, MAX_GIF_SIZE, MAX_SHEET, frameSizeForSheet } from './animexport.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('view');
@@ -23,11 +23,19 @@ const baseSettings = () => withDefaults(store.get('defaultSettings', null));
 const status = (t) => { $('status').textContent = t; };
 
 // ---------------- files ----------------
+// src: key of the source file's bytes in the saved session (shared by models split out of it); path: see subtree().
+function newFile(props) {
+  const file = { id: nextId++, path: null, disabled: [], animSel: '', animTime: 0, checked: true, warnings: new Set(), status: 'loading', job: null, thumb: '', ...props };
+  files.push(file);
+  return file;
+}
+
 async function addFiles(list) {
   for (const f of list) {
     if (!/\.(rbxmx?|obj)$/i.test(f.name)) { status(`Skipped ${f.name}: unsupported type`); continue; }
-    const file = { id: nextId++, name: f.name, bytes: new Uint8Array(await f.arrayBuffer()), settings: baseSettings(), animSel: '', animTime: 0, checked: true, warnings: new Set(), status: 'loading', job: null, thumb: '' };
-    files.push(file);
+    const bytes = new Uint8Array(await f.arrayBuffer()), src = crypto.randomUUID().replaceAll('-', '');
+    window.native.putSessionBlob(src, bytes).catch((e) => status(`${f.name} won't reopen next launch: ${e.message}`));
+    const file = newFile({ name: f.name, bytes, src, settings: baseSettings() });
     renderList();
     if (!current) select(file);
     load(file);
@@ -39,28 +47,30 @@ async function load(file) {
   renderList();
   const warn = (m) => { file.warnings.add(m); if (file === current) renderWarnings(); };
   try {
-    file.job = await createJob(file.name, file.bytes, warn);
+    file.job = await createJob(file.name, file.bytes, warn, file.path, file.disabled.map(keyPath));
     file.status = 'ready';
+    restoreAnimation(file);
   } catch (e) {
     console.error(e);
     file.status = 'error'; file.error = e.message;
   }
   renderList();
-  if (file === current) { renderWarnings(); syncTimeline(); syncAnimBar(); requestPreview(); }
+  if (file === current) { renderWarnings(); syncTimeline(); syncAnimBar(); requestPreview(); renderWorkspace(); }
   thumb(file);
 }
 
 function select(file) {
+  closeTextEdit();
   current = file;
   selectedText = null;
   setPlaying(false); setAnimPlaying(false);
-  renderList(); buildPanel(); renderWarnings(); syncTimeline(); syncAnimBar(); requestPreview();
+  renderList(); buildPanel(); renderWarnings(); syncTimeline(); syncAnimBar(); requestPreview(); renderWorkspace();
 }
 
 function removeFile(file) {
   files.splice(files.indexOf(file), 1);
   if (current === file) current = files[0] || null;
-  renderList(); buildPanel(); renderWarnings(); requestPreview();
+  renderList(); buildPanel(); renderWarnings(); requestPreview(); renderWorkspace();
 }
 
 function renderList() {
@@ -81,6 +91,8 @@ function renderList() {
     return li;
   }));
   $('emptyHint').hidden = files.length > 0;
+  window.native.setActivity({ details: !current ? 'Getting started' : prefs.discordFile ? `Editing ${current.name}` : 'Editing an icon',
+    state: prefs.discordCount ? `${files.length} file${files.length === 1 ? '' : 's'} open` : '', showTime: prefs.discordTime });
 }
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
@@ -89,6 +101,228 @@ function renderWarnings() {
   $('warnBox').hidden = !w.length;
   $('warnSummary').textContent = `${w.length} warning${w.length > 1 ? 's' : ''} for ${current?.name ?? ''}`;
   $('warnList').replaceChildren(...w.map((t) => Object.assign(document.createElement('li'), { textContent: t })));
+}
+
+// ---------------- workspace ----------------
+// The current file's instance tree. Select rows (Ctrl/Shift for several) and drag them onto the file list:
+// each becomes its own file that renders only that instance, starting from the current settings.
+const ICONS = {
+  model: 'Model Actor WorldModel Tool', part: 'Part WedgePart CornerWedgePart TrussPart SpawnLocation Seat VehicleSeat SkateboardPlatform FlagStand',
+  meshpart: 'MeshPart SpecialMesh BlockMesh CylinderMesh FileMesh CharacterMesh WrapLayer WrapTarget', union: 'UnionOperation NegateOperation IntersectOperation PartOperation',
+  folder: 'Folder Configuration', accessory: 'Accessory Hat', attachment: 'Attachment Bone', particles: 'ParticleEmitter Fire Smoke Sparkles',
+  light: 'PointLight SpotLight SurfaceLight Highlight', humanoid: 'Humanoid HumanoidDescription BodyColors Shirt Pants ShirtGraphic Animator AnimationController',
+  decal: 'Decal Texture SurfaceAppearance', trail: 'Trail Beam',
+};
+const ICON_OF = new Map(Object.entries(ICONS).flatMap(([icon, classes]) => classes.split(' ').map((c) => [c, icon])));
+const classIcon = (c) => ICON_OF.get(c) ?? (/Script$/.test(c) ? 'script' : /Weld$|Constraint$|^Motor/.test(c) ? 'weld' : 'instance');
+
+// Rows are keyed by path ("0/3/1", see pathOf), so open/selected/disabled rows survive the file rebuilding.
+const ws = { file: null, full: null, roots: null, open: null, sel: new Set(), anchor: null, rows: [], drag: null };
+const keyPath = (key) => key.split('/').map(Number);
+const instAt = (key) => atPath(ws.full, keyPath(key));
+function renderWorkspace() {
+  const ul = $('wsTree'), job = current?.job;
+  if (ws.file !== current) Object.assign(ws, { file: current, full: null, roots: null, open: null, sel: new Set(), anchor: null });
+  if (job?.treeRoots) Object.assign(ws, { full: job.tree.roots, roots: job.treeRoots });
+  else if (current?.status !== 'loading') ws.roots = null; // while rebuilding (e.g. after disabling) the last tree stays up
+  if (!ws.roots) {
+    const msg = !current ? 'Open a file to see its models' : current.status === 'loading' ? 'Loading…' : job ? 'OBJ files have no hierarchy' : 'Nothing to show';
+    ul.replaceChildren(Object.assign(document.createElement('li'), { className: 'hint', textContent: msg }));
+    return;
+  }
+  const rootKeys = ws.roots.map((r) => pathOf(r, ws.full).join('/')), off = new Set(current.disabled);
+  ws.open ??= new Set(rootKeys.length === 1 ? rootKeys : []);
+  ws.rows = [];
+  const add = (inst, key, depth, inherited) => {
+    const own = off.has(key);
+    ws.rows.push({ inst, key, depth, own, dim: own || inherited });
+    if (ws.open.has(key)) inst.children.forEach((c, i) => add(c, `${key}/${i}`, depth + 1, own || inherited));
+  };
+  ws.roots.forEach((r, i) => add(r, rootKeys[i], 0, false));
+  ul.replaceChildren(...ws.rows.map(({ inst, key, depth, own, dim }, i) => {
+    const li = Object.assign(document.createElement('li'), { className: `${ws.sel.has(key) ? 'sel' : ''}${dim ? ' off' : ''}`, title: `${nameOf(inst)} (${inst.className})${dim ? ' — not rendered' : ''}` });
+    li.dataset.i = i;
+    li.style.paddingLeft = `${4 + depth * 14}px`;
+    li.innerHTML = `<span class="tw">${inst.children.length ? (ws.open.has(key) ? '▾' : '▸') : ''}</span><i class="ico ico-${classIcon(inst.className)}"></i><span class="name"></span>${own ? '<span class="offTag">(Disabled)</span>' : ''}<span class="cls"></span>`;
+    li.querySelector('.name').textContent = nameOf(inst);
+    li.querySelector('.cls').textContent = inst.className;
+    return li;
+  }));
+}
+const wsRowAt = (e) => ws.rows[e.target.closest('#wsTree li[data-i]')?.dataset.i];
+const overFileList = (e) => { const r = $('fileList').getBoundingClientRect(); return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom; };
+const toggleOpen = (key) => { ws.open.has(key) ? ws.open.delete(key) : ws.open.add(key); renderWorkspace(); };
+
+$('wsTree').addEventListener('pointerdown', (e) => {
+  const row = wsRowAt(e);
+  if (!row || e.button !== 0) return;
+  if (e.target.classList.contains('tw')) return toggleOpen(row.key);
+  let collapseTo = null;
+  if (e.shiftKey && ws.anchor) {
+    const order = ws.rows.map((r) => r.key), [a, b] = [order.indexOf(ws.anchor), order.indexOf(row.key)].sort((x, y) => x - y);
+    if (a >= 0) ws.sel = new Set(order.slice(a, b + 1));
+  } else if (e.ctrlKey || e.metaKey) { ws.sel.has(row.key) ? ws.sel.delete(row.key) : ws.sel.add(row.key); ws.anchor = row.key; }
+  else if (ws.sel.has(row.key)) collapseTo = row.key; // keep a multi-selection draggable; a plain click narrows it on release
+  else { ws.sel = new Set([row.key]); ws.anchor = row.key; }
+  ws.drag = { x: e.clientX, y: e.clientY, ghost: null, collapseTo };
+  renderWorkspace();
+});
+// Tracked on the window so the drag keeps working outside the tree.
+addEventListener('pointermove', (e) => {
+  const d = ws.drag;
+  if (!d || !ws.sel.size) return;
+  if (!d.ghost && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5) {
+    d.ghost = Object.assign(document.createElement('div'), { id: 'wsGhost', textContent: ws.sel.size > 1 ? `${ws.sel.size} models` : nameOf(instAt([...ws.sel][0])) });
+    document.body.append(d.ghost);
+  }
+  if (!d.ghost) return;
+  Object.assign(d.ghost.style, { left: `${e.clientX + 12}px`, top: `${e.clientY + 10}px` });
+  $('fileList').classList.toggle('dropTarget', overFileList(e));
+});
+const endWsDrag = (e, drop) => {
+  if (!ws.drag) return;
+  const { ghost, collapseTo } = ws.drag;
+  ws.drag = null;
+  ghost?.remove();
+  $('fileList').classList.remove('dropTarget');
+  if (ghost && drop && overFileList(e)) splitOut([...ws.sel]);
+  else if (!ghost && collapseTo) { ws.sel = new Set([collapseTo]); ws.anchor = collapseTo; renderWorkspace(); }
+};
+addEventListener('pointerup', (e) => endWsDrag(e, true));
+addEventListener('pointercancel', (e) => endWsDrag(e, false));
+$('wsTree').addEventListener('dblclick', (e) => {
+  const row = wsRowAt(e);
+  if (row?.inst.children.length && !e.target.classList.contains('tw')) toggleOpen(row.key);
+});
+
+// Right-click: disable / enable. Disabled instances (and everything under them) are left out of the render.
+$('wsTree').addEventListener('contextmenu', (e) => {
+  const row = wsRowAt(e);
+  if (!row) return;
+  e.preventDefault();
+  if (!ws.sel.has(row.key)) { ws.sel = new Set([row.key]); ws.anchor = row.key; renderWorkspace(); }
+  const keys = [...ws.sel], off = keys.every((k) => current.disabled.includes(k)), n = keys.length > 1 ? ` ${keys.length} items` : '';
+  const menu = $('ctxMenu'), btn = Object.assign(document.createElement('button'), { textContent: off ? `Enable${n}` : `Disable${n}` });
+  btn.onclick = () => { closeMenu(); setDisabled(keys, !off); };
+  menu.replaceChildren(btn);
+  menu.hidden = false;
+  const r = menu.getBoundingClientRect();
+  Object.assign(menu.style, { left: `${Math.min(e.clientX, innerWidth - r.width - 4)}px`, top: `${Math.min(e.clientY, innerHeight - r.height - 4)}px` });
+});
+const closeMenu = () => { $('ctxMenu').hidden = true; };
+addEventListener('pointerdown', (e) => { if (!e.target.closest('#ctxMenu')) closeMenu(); }, true);
+addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
+addEventListener('blur', closeMenu);
+
+function setDisabled(keys, off) {
+  const f = current, set = new Set(f.disabled);
+  for (const k of keys) off ? set.add(k) : set.delete(k);
+  f.disabled = [...set];
+  renderWorkspace();
+  load(f);
+  status(`${off ? 'Disabled' : 'Enabled'} ${keys.length > 1 ? `${keys.length} items` : nameOf(instAt(keys[0]))}`);
+}
+
+// A split-out model keeps the disabled state of its own descendants.
+function splitOut(keys) {
+  const src = current;
+  if (!ws.full || !keys.length) return;
+  for (const key of keys) {
+    load(newFile({ name: nameOf(instAt(key)), bytes: src.bytes, src: src.src, path: keyPath(key), disabled: src.disabled.filter((k) => k.startsWith(key + '/')), settings: clone(src.settings), checked: src.checked }));
+  }
+  renderList();
+  status(`Added ${keys.length} model${keys.length > 1 ? 's' : ''} from ${src.name} as separate icons`);
+}
+
+// ---------------- app settings ----------------
+// Theme, accent, interface size, Discord privacy and behavior. Main reads the ones it acts on from the same file.
+let prefs = prefsWithDefaults({});
+const prefsLoaded = window.native.getPrefs().then((p) => { prefs = prefsWithDefaults(p); applyPrefs(); }, () => applyPrefs());
+function applyPrefs() {
+  const root = document.documentElement, custom = prefs.accent.toLowerCase() !== PREFS[0].fields[1].def;
+  root.dataset.theme = prefs.theme;
+  for (const [k, v] of [['--accent', prefs.accent], ['--accent2', `color-mix(in srgb, ${prefs.accent} 75%, #000)`]]) custom ? root.style.setProperty(k, v) : root.style.removeProperty(k);
+  window.native.setZoom(parseFloat(prefs.uiScale) / 100 || 1);
+  renderList(); // refreshes the Discord status text
+}
+function setPref(key, value) {
+  prefs[key] = value;
+  applyPrefs();
+  window.native.setPrefs(prefs).catch((e) => status(`Could not save settings: ${e.message}`));
+}
+let settingsTab = PREFS[0].id;
+function buildSettings() {
+  $('setNav').replaceChildren(...PREFS.map((sec) => {
+    const b = Object.assign(document.createElement('button'), { type: 'button', className: sec.id === settingsTab ? 'active' : '' });
+    b.innerHTML = `<i class="uiIco ui-${sec.icon}"></i><span></span>`;
+    b.querySelector('span').textContent = sec.title;
+    b.onclick = () => { settingsTab = sec.id; buildSettings(); };
+    return b;
+  }));
+  const sec = PREFS.find((s) => s.id === settingsTab), body = $('setBody');
+  body.replaceChildren(...sec.fields.map((fd) => fieldEl(fd, prefs[fd.key], (v) => {
+    setPref(fd.key, v);
+    if (fd.key === 'discordActivity') buildSettings(); // the detail toggles below follow it
+  }, `pref.${fd.key}`)));
+  if (sec.id === 'activity') for (const row of body.querySelectorAll('.field:not([data-key="pref.discordActivity"])')) row.style.opacity = prefs.discordActivity ? '' : '.45';
+  if (sec.hint) body.append(Object.assign(document.createElement('p'), { className: 'setHint', textContent: sec.hint }));
+  if (sec.id === 'access') {
+    const row = Object.assign(document.createElement('div'), { className: 'setActions' });
+    for (const [label, fn] of [['Roblox access…', () => $('credsBtn').click()], ['Open asset cache', () => window.native.openCache()],
+      ['Clear asset cache', async () => { await window.native.clearCache(); clearMemoryCache(); status('Asset cache cleared'); }]]) {
+      const b = Object.assign(document.createElement('button'), { type: 'button', textContent: label });
+      b.onclick = fn;
+      row.append(b);
+    }
+    body.append(row);
+  }
+}
+$('settingsBtn').onclick = () => { buildSettings(); $('settingsDlg').showModal(); };
+$('setDone').onclick = () => $('settingsDlg').close();
+$('setReset').onclick = () => {
+  if (!confirm('Reset all settings to their defaults? Your files and render settings are not affected.')) return;
+  prefs = prefsWithDefaults({});
+  applyPrefs(); buildSettings();
+  window.native.setPrefs(prefs);
+};
+
+// ---------------- session ----------------
+// Open files and their edits are saved every few seconds and on close, then reopened on the next launch.
+function sessionJson() {
+  return JSON.stringify({ current: files.indexOf(current), linkEdits: $('linkEdits').checked,
+    files: files.map((f) => ({ name: f.name, src: f.src, path: f.path, disabled: f.disabled, settings: f.settings, animSel: f.animSel, animTime: f.animTime, checked: f.checked })) });
+}
+let savedSession = null; // null until the previous session is restored, so an early save can't wipe it
+function saveSession() {
+  if (savedSession == null) return;
+  const json = sessionJson();
+  if (json === savedSession) return;
+  const r = window.native.saveSession(json);
+  if (r === true) savedSession = json; else status(`Could not save the session: ${r}`);
+}
+async function restoreSession() {
+  try {
+    await prefsLoaded;
+    const s = prefs.restoreSession ? await window.native.getSession() : null;
+    for (const f of s?.files ?? []) if (s.blobs[f.src]) newFile({ ...f, bytes: s.blobs[f.src], settings: withDefaults(f.settings) });
+    if (s) $('linkEdits').checked = !!s.linkEdits;
+    if (files.length) { select(files[s.current] ?? files[0]); files.forEach(load); status(`Reopened ${files.length} file${files.length > 1 ? 's' : ''} from last time`); }
+  } catch (e) { console.error(e); status(`Could not reopen last session: ${e.message}`); }
+  savedSession = '';
+}
+const sessionRestored = restoreSession();
+setInterval(saveSession, 3000);
+addEventListener('beforeunload', saveSession);
+
+// Animation picked before a reload/restart: added IDs are re-downloaded, file animations reloaded.
+function restoreAnimation(file) {
+  const key = file.animSel, job = file.job;
+  if (!key) return;
+  let entry = job.rig && job.animations.find((a) => a.key === key);
+  if (!entry && job.rig && key.startsWith('id:')) job.animations.push(entry = { key, name: `Animation ${key.slice(3)}`, id: key.slice(3), track: null });
+  if (!entry) { file.animSel = ''; return; }
+  ensureTrack(entry).then(() => { entry.name = entry.track?.name ?? entry.name; }, (e) => { file.animSel = ''; file.warnings.add(e.message); })
+    .finally(() => { if (file === current) { syncAnimBar(); renderWarnings(); } renderList(); requestPreview(); thumb(file); });
 }
 
 // ---------------- rendering ----------------
@@ -285,7 +519,7 @@ function setText(id, patch, rebuild = false) {
   if (rebuild) return buildTextSection();
   for (const [k, v] of Object.entries(patch)) {
     const row = document.querySelector(`#textSection .field[data-key="text.${k}"]`);
-    if (row) for (const i of row.querySelectorAll('input')) if (i.type !== 'checkbox' && i !== document.activeElement) i.value = v;
+    if (row) for (const i of row.querySelectorAll('input, textarea')) if (i.type !== 'checkbox' && i !== document.activeElement) i.value = v;
     const name = k === 'text' && document.querySelector(`#textSection li[data-id="${id}"] .name`);
     if (name) name.textContent = layerName(v);
   }
@@ -293,6 +527,7 @@ function setText(id, patch, rebuild = false) {
 
 function selectText(id) {
   if (id === selectedText) return syncTextSel();
+  if (editingText && editingText !== id) closeTextEdit();
   selectedText = id;
   if (id) openSections.add('text');
   buildTextSection();
@@ -364,15 +599,48 @@ function buildTextSection() {
 // Selection box over the preview, placed from the last preview render's text layout.
 function syncTextSel() {
   const el = $('textSel'), L = current && previewLayouts.find((l) => l.id === selectedText);
-  if (!L) { el.hidden = true; return; }
+  if (!L) { el.hidden = true; if (editingText) closeTextEdit(); return; }
   const vr = $('viewport').getBoundingClientRect(), cr = canvas.getBoundingClientRect(), w = cr.width;
+  const left = `${cr.left - vr.left + L.cx * w}px`, top = `${cr.top - vr.top + L.cy * w}px`;
   el.hidden = false;
   Object.assign(el.style, {
-    left: `${cr.left - vr.left + L.cx * w}px`, top: `${cr.top - vr.top + L.cy * w}px`,
-    width: `${(L.box[2] - L.box[0]) * w}px`, height: `${(L.box[3] - L.box[1]) * w}px`,
+    left, top, width: `${(L.box[2] - L.box[0]) * w}px`, height: `${(L.box[3] - L.box[1]) * w}px`,
     transform: `rotate(${L.rot}rad) translate(${L.box[0] * w}px, ${L.box[1] * w}px)`,
   });
+  const t = editingText === selectedText && layerOf(current, editingText);
+  if (!t) return;
+  // Same font, size, spacing and stretch as the render, so the caret sits on the real glyphs underneath.
+  const k = w / 512, px = t.size * k, lineH = px * t.lineHeight, pad = Math.max(0, t.strokeWidth) * k, half = px * 0.62 + pad;
+  Object.assign($('textEdit').style, {
+    left, top, width: `${((L.box[2] - L.box[0]) * w) / t.scaleX}px`, height: `${((L.box[3] - L.box[1]) * w) / t.scaleY}px`,
+    font: fontString(t, px), letterSpacing: `${t.spacing * k}px`, lineHeight: `${lineH}px`, textAlign: t.align,
+    padding: `${Math.max(0, half - lineH / 2)}px ${pad}px 0`,
+    transform: `rotate(${L.rot}rad) translate(${L.box[0] * w}px, ${L.box[1] * w}px) scale(${t.scaleX}, ${t.scaleY})`,
+  });
+  $('textEdit').classList.toggle('curved', !!t.curve); // curved text can't line up with a textarea: show the text itself
 }
+
+// Double-click a text on the preview: type right on it. Enter or clicking away finishes, Shift+Enter adds a line.
+let editingText = null;
+function openTextEdit(id) {
+  const t = layerOf(current, id), ed = $('textEdit');
+  if (!t) return;
+  editingText = id;
+  ed.value = t.text;
+  ed.hidden = false;
+  syncTextSel();
+  ed.focus(); ed.select();
+}
+function closeTextEdit() {
+  editingText = null;
+  $('textEdit').hidden = true;
+}
+$('textEdit').oninput = () => { if (editingText) setText(editingText, { text: $('textEdit').value }); };
+$('textEdit').onblur = closeTextEdit;
+$('textEdit').onkeydown = (e) => {
+  e.stopPropagation(); // Delete/arrows/Space edit the text, not the layer or playback
+  if (e.key === 'Escape' || (e.key === 'Enter' && !e.shiftKey)) { e.preventDefault(); $('textEdit').blur(); }
+};
 
 // Sync range fields after viewport interaction without rebuilding the panel.
 function syncField(sec, key) {
@@ -436,8 +704,7 @@ canvas.addEventListener('dblclick', (e) => {
   const hit = current && hitText(previewLayouts, ...framePoint(e));
   if (!hit) return;
   selectText(hit);
-  const ta = document.querySelector('#textSection .field[data-key="text.text"] textarea');
-  ta?.focus(); ta?.select();
+  openTextEdit(hit);
 });
 canvas.addEventListener('wheel', (e) => {
   if (!current) return;
@@ -464,6 +731,12 @@ $('textSel').addEventListener('pointerdown', (e) => {
   e.target.setPointerCapture(e.pointerId);
   const r = canvas.getBoundingClientRect(), cx = r.left + L.cx * r.width, cy = r.top + L.cy * r.height;
   drag = { handle: true, mode, cx, cy, d0: Math.hypot(e.clientX - cx, e.clientY - cy) || 1, a0: Math.atan2(e.clientY - cy, e.clientX - cx), size: t.size, stroke: t.strokeWidth, rot: t.rotation };
+  if (mode === 'sx' || mode === 'sy') {
+    const a = L.rot + (mode === 'sy' ? Math.PI / 2 : 0);
+    drag.axis = [Math.cos(a), Math.sin(a)];
+    drag.d0 = Math.abs((e.clientX - cx) * drag.axis[0] + (e.clientY - cy) * drag.axis[1]) || 1;
+    drag.stretch = mode === 'sx' ? t.scaleX : t.scaleY;
+  }
 });
 // Tracked on the window so the gesture keeps working wherever the pointer goes.
 addEventListener('pointermove', (e) => {
@@ -471,6 +744,9 @@ addEventListener('pointermove', (e) => {
   if (drag.mode === 'scale') {
     const f = Math.hypot(e.clientX - drag.cx, e.clientY - drag.cy) / drag.d0;
     setText(selectedText, { size: clamp(Math.round(drag.size * f), 4, 400), strokeWidth: Math.round(drag.stroke * f * 2) / 2 });
+  } else if (drag.axis) {
+    const d = Math.abs((e.clientX - drag.cx) * drag.axis[0] + (e.clientY - drag.cy) * drag.axis[1]);
+    setText(selectedText, { [drag.mode === 'sx' ? 'scaleX' : 'scaleY']: clamp(Math.round(drag.stretch * (d / drag.d0) * 100) / 100, 0.1, 5) });
   } else {
     let deg = drag.rot + ((Math.atan2(e.clientY - drag.cy, e.clientX - drag.cx) - drag.a0) * 180) / Math.PI;
     if (e.shiftKey) deg = Math.round(deg / 15) * 15;
@@ -648,7 +924,7 @@ async function encode(file, { size, format, ss }) {
   requestPreview();
   return canvasBytes(c, format);
 }
-const baseName = (n) => n.replace(/\.[^.]+$/, '');
+const baseName = (n) => n.replace(/\.(rbxmx?|obj)$/i, ''); // split-out models have no extension and may contain dots
 
 async function exportFiles(list) {
   const ready = list.filter((f) => f.job);
@@ -682,8 +958,27 @@ $('exportAll').onclick = () => exportFiles(files);
 // ---------------- animated export ----------------
 // Frames render at exact times through the same path as stills (pose, deterministic VFX/trails, post), never realtime.
 const yieldUI = () => new Promise((r) => setTimeout(r));
-const syncAnimDlg = () => { $('animDlg').dataset.format = $('axFormat').value; };
-for (const id of ['axScope', 'axFormat', 'axSource', 'axFps', 'axLoop', 'axLock', 'axCols', 'axPad', 'axGifBg', 'axGifColor']) {
+// Frame size is the dialog's own (it starts at the toolbar size). Sheets can instead be sized as a whole, with frames
+// shrinking to fit. The line under the options shows the resulting image.
+const sheetPlan = () => {
+  const n = frameTimes(Math.max(0, +$('axStart').value || 0), Math.max(0.01, +$('axDuration').value || 1), clamp(Math.round(+$('axFps').value || 24), 1, 60), $('axLoop').checked).length;
+  const cols = Math.max(0, Math.round(+$('axCols').value || 0)), pad = Math.max(0, Math.round(+$('axPad').value || 0));
+  const sheet = $('axSizeBy').value === 'sheet' ? +$('axSheetSize').value : 0, size = sheet ? frameSizeForSheet(n, sheet, cols, pad) : +$('axSize').value;
+  return { n, size, sheet, layout: sheetLayout(n, size, cols, pad) };
+};
+function syncAnimDlg() {
+  const fmt = $('axFormat').value;
+  Object.assign($('animDlg').dataset, { format: fmt, sizeby: $('axSizeBy').value });
+  if (fmt !== 'sheet') return;
+  const { n, size, sheet, layout: L } = sheetPlan(), w = sheet || L.width, h = sheet || L.height;
+  $('axSheetInfo').textContent = `${n} frames · ${L.cols} × ${L.rows} grid · ${size} px per frame · sheet ${w} × ${h} px`
+    + (!L.fits ? ` — over the ${MAX_SHEET} px limit, so numbered PNGs are saved instead. Lower the frame size, FPS or duration.`
+      : sheet && size < 32 ? ' — frames are very small; use a bigger sheet or fewer frames.' : '');
+  $('axSheetInfo').className = `sheetOnly ${L.fits && !(sheet && size < 32) ? 'muted' : 'warn'}`;
+}
+for (const id of ['axStart', 'axDuration']) $(id).oninput = syncAnimDlg;
+if (store.get('ax:axSize', null) == null) $('axSize').value = $('expSize').value;
+for (const id of ['axScope', 'axFormat', 'axSizeBy', 'axSheetSize', 'axSize', 'axSource', 'axFps', 'axLoop', 'axLock', 'axCols', 'axPad', 'axGifBg', 'axGifColor']) {
   const el = $(id), prop = el.type === 'checkbox' ? 'checked' : 'value', saved = store.get('ax:' + id, null);
   if (saved != null) el[prop] = saved;
   el.onchange = () => { store.set('ax:' + id, el[prop]); syncAnimDlg(); };
@@ -708,11 +1003,12 @@ async function exportAnimation() {
   if (!list.length) return status('Nothing ready to export');
   const folder = await window.native.pickFolder();
   if (!folder) return;
-  const o = { ...exportOpts(), format: $('axFormat').value, source: $('axSource').value,
+  const o = { ...exportOpts(), size: +$('axSize').value, format: $('axFormat').value, source: $('axSource').value,
     fps: clamp(Math.round(+$('axFps').value || 24), 1, 60), start: Math.max(0, +$('axStart').value || 0), duration: Math.max(0.01, +$('axDuration').value || 1),
     loop: $('axLoop').checked, lock: $('axLock').checked, cols: Math.max(0, Math.round(+$('axCols').value || 0)), pad: Math.max(0, Math.round(+$('axPad').value || 0)),
     gifBg: $('axGifBg').value === 'solid' ? hexToVec3($('axGifColor').value).map((v) => v * 255) : null };
   if (o.format === 'gif') o.size = Math.min(o.size, MAX_GIF_SIZE);
+  if (o.format === 'sheet') ({ size: o.size, sheet: o.sheet } = sheetPlan()); // same frame count for every file
   setPlaying(false); setAnimPlaying(false);
   const saved = list.map((f) => [f, f.animTime, f.settings.vfx.time]);
   axState = { cancelled: false };
@@ -765,6 +1061,7 @@ async function exportClip(f, o, folder, name, progress) {
   const write = async (file, bytes) => window.native.writeFile(await window.native.joinPath(folder, file), bytes);
   let format = o.format, note = null;
   const layout = format === 'sheet' ? sheetLayout(times.length, o.size, o.cols, o.pad) : null;
+  if (layout && o.sheet) Object.assign(layout, { width: o.sheet, height: o.sheet }); // fixed sheet: frames already fit
   if (layout && !layout.fits) { format = 'png'; note = `${name}: a ${layout.width}×${layout.height} sheet is too large, wrote numbered PNGs`; }
 
   if (format === 'png') {
@@ -846,6 +1143,7 @@ $('resetBtn').onclick = () => {
 };
 $('defaultBtn').onclick = () => { if (current) { store.set('defaultSettings', current.settings); status('Saved as default for new files'); } };
 $('reloadBtn').onclick = () => { if (current) { clearMemoryCache(); load(current); } };
+$('trayBtn').onclick = () => window.native.hideToTray();
 $('checkAll').onclick = () => { files.forEach((f) => { f.checked = true; }); renderList(); };
 $('checkNone').onclick = () => { files.forEach((f) => { f.checked = false; }); renderList(); };
 
@@ -952,6 +1250,7 @@ addEventListener('drop', async (e) => {
 
 buildPanel();
 renderList();
+renderWorkspace();
 
 // Launch splash (built in index.html): fade out once the renderer is up, after the intro has played (~2 s).
 {
@@ -962,8 +1261,8 @@ renderList();
     if (window.__splashStart == null) return requestAnimationFrame(schedule);
     setTimeout(hide, reduced ? 0 : Math.max(400, window.__splashStart + 2300 - performance.now()));
   };
-  schedule();
+  prefsLoaded.then(() => (prefs.splash ? schedule() : hide()));
 }
 
 // Test hook: lets an automated harness load files and grab renders.
-window.__app = { addFiles, files, renderer, encode, select, loadAnimationId, exportClip };
+window.__app = { addFiles, files, renderer, encode, select, loadAnimationId, exportClip, sessionRestored, saveSession, splitOut, sheetPlan };

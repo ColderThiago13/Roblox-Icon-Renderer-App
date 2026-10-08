@@ -310,6 +310,12 @@ async function buildPart(inst, ctx) {
   }
   if (sa) await applySurfaceAppearance(material, sa, col, ctx.warn);
   await applyAppearance(mesh, appearance, ctx.warn);
+  // A zero-thickness axis would zero the lighting normals (renders black), and thin parts / flat meshes
+  // (cards, leaves, blades) should show from both sides, as they do in Studio. DoubleSided meshes too.
+  mesh.scale.set(...mesh.scale.toArray().map((v) => (Math.abs(v) < 1e-4 ? 1e-4 : v)));
+  if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+  const ext = mesh.geometry.boundingBox.getSize(new THREE.Vector3()).multiply(mesh.scale).toArray().map(Math.abs);
+  if (inst.props.doublesided || Math.min(...ext) < 0.02 * Math.max(...ext)) material.side = THREE.DoubleSide;
   if (transparency >= 1) mesh.visible = false;
   mesh.castShadow = mesh.receiveShadow = true;
   mesh.userData.inst = inst;
