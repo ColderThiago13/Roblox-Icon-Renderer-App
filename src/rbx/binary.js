@@ -65,9 +65,12 @@ function rotationFromId(id) {
   return [c0[0], c1[0], c2[0], c0[1], c1[1], c2[1], c0[2], c1[2], c2[2]].map((v) => v + 0);
 }
 
+// BinaryString properties kept as bytes: attributes, and union meshes (CSGMDL).
+const RAW = new Set(['attributesserialize', 'meshdata', 'meshdata2']);
+
 function readValues(r, type, n, name, sstr) {
   switch (type) {
-    case 0x01: { const out = []; for (let i = 0; i < n; i++) { const raw = r.rawString(); out.push(name === 'attributesserialize' ? raw.slice() : utf8.decode(raw)); } return out; }
+    case 0x01: { const out = []; for (let i = 0; i < n; i++) { const raw = r.rawString(); out.push(RAW.has(name) ? raw.slice() : utf8.decode(raw)); } return out; }
     case 0x02: return Array.from(r.bytes(n), (v) => v !== 0);
     case 0x03: return r.ints(n);
     case 0x04: return r.floats(n);

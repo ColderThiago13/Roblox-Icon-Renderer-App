@@ -113,7 +113,7 @@ export class IconRenderer {
   // Framing that holds a whole clip. A subsample of every frame places the camera; then each frame's exact
   // screen-space extremes are added, so thin limbs, particles or trail tips skipped by the subsample never clip.
   // poseAt(t) poses the job at clip time t.
-  clipFit(job, s, times, poseAt) {
+  clipFit(job, s, times, poseAt, aspect = 1) {
     const sub = [], extremes = [], v = new THREE.Vector3(), step = Math.max(1, Math.ceil(times.length / 240));
     let minY = Infinity;
     times.forEach((t, i) => {
@@ -124,7 +124,7 @@ export class IconRenderer {
       for (let k = 1; k < job.points.length; k += 3) minY = Math.min(minY, job.points[k]);
     });
     const fit = { points: new Float32Array(sub), minY: Number.isFinite(minY) ? minY : 0 };
-    const { cam } = this.setupCamera(job, s, fit);
+    const { cam } = this.setupCamera(job, s, fit, aspect);
     const vp = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
     times.forEach((t) => {
       poseAt(t);
@@ -143,7 +143,9 @@ export class IconRenderer {
   }
 
   // fit = { points, minY } locks the framing (animated export); otherwise frame the current pose.
-  setupCamera(job, s, fit = null) {
+  // aspect (width / height): the frame is still rendered square, then cropped to the centered aspect rectangle,
+  // so the model is fitted into that rectangle.
+  setupCamera(job, s, fit = null, aspect = 1) {
     const c = s.camera, points = fit?.points ?? this.framingPoints(job, s);
     const { center, radius } = boundsOf(points);
     const persp = c.projection !== 'orthographic';
@@ -168,8 +170,9 @@ export class IconRenderer {
       x0 = Math.min(x0, v.x); x1 = Math.max(x1, v.x); y0 = Math.min(y0, v.y); y1 = Math.max(y1, v.y);
     }
     if (!(x1 > x0)) { x0 = y0 = -1; x1 = y1 = 1; }
-    const k = ((1 - c.padding) / Math.max((x1 - x0) / 2, (y1 - y0) / 2, 1e-6)) * c.zoom;
-    const M = new THREE.Matrix4().set(k, 0, 0, -k * (x0 + x1) / 2 + c.offsetX * 2, 0, k, 0, -k * (y0 + y1) / 2 + c.offsetY * 2, 0, 0, 1, 0, 0, 0, 0, 1);
+    const [cw, ch] = cropOf(aspect);
+    const k = ((1 - c.padding) / Math.max((x1 - x0) / 2 / cw, (y1 - y0) / 2 / ch, 1e-6)) * c.zoom;
+    const M = new THREE.Matrix4().set(k, 0, 0, -k * (x0 + x1) / 2 + c.offsetX * 2 * cw, 0, k, 0, -k * (y0 + y1) / 2 + c.offsetY * 2 * ch, 0, 0, 1, 0, 0, 0, 0, 1);
     cam.projectionMatrix.premultiply(M);
     cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert();
     return { cam, center, radius, minY: fit?.minY ?? boundsOf(job.points).minY };
@@ -182,6 +185,7 @@ export class IconRenderer {
     if (job.vfxGroup && s.vfx.enabled) sc.add(job.vfxGroup);
     if (job.trailGroup && s.trails.enabled && s.trails.length > 0) sc.add(job.trailGroup);
     if (job.hlGroup) sc.add(job.hlGroup);
+    sc.environment = s.lighting.robloxSky && this.skyEnv ? this.skyEnv : this.env;
     sc.environmentIntensity = s.lighting.env;
 
     const L = s.lighting, { center, radius } = frame;
@@ -196,6 +200,8 @@ export class IconRenderer {
       if (!o.isMesh) return;
       o.receiveShadow = s.shadows.selfShadows;
       if (o.material.userData?.neon) o.material.emissiveIntensity = L.neon;
+      // ponytail: sqrt keeps EmissiveStrength 1..100 near Neon brightness; recalibrate against Studio if glow looks off.
+      if (o.material.userData?.emissiveStrength) o.material.emissiveIntensity = L.neon * Math.sqrt(o.material.userData.emissiveStrength) / 4;
     });
 
     const baseYaw = L.followCamera ? s.camera.yaw : 0;
@@ -262,11 +268,11 @@ export class IconRenderer {
     return d;
   }
 
-  // size: output px. out: 'screen' or 'pixels'. Returns ImageData for 'pixels'.
-  render(job, s, size, { out = 'screen', supersample = 1, fit = null } = {}) {
+  // size: output px (the long side). out: 'screen' or 'pixels'. Returns ImageData for 'pixels', cropped to aspect.
+  render(job, s, size, { out = 'screen', supersample = 1, fit = null, aspect = 1 } = {}) {
     const gl = this.gl;
     const W = Math.round(size * supersample), px = W / 512;
-    const frame = this.setupCamera(job, s, fit);
+    const frame = this.setupCamera(job, s, fit, aspect);
     const cam = frame.cam;
     this.setupScene(job, s, frame);
 
@@ -360,13 +366,27 @@ export class IconRenderer {
     }
     const outRT = this.rt('out', size, size, { type: THREE.UnsignedByteType });
     this.pass(this.mat('final', S.finalFS, finalU(true)), outRT);
-    const buf = new Uint8Array(size * size * 4);
-    gl.readRenderTargetPixels(outRT, 0, 0, size, size, buf);
-    const img = new ImageData(size, size), row = size * 4;
-    for (let y = 0; y < size; y++) img.data.set(buf.subarray((size - 1 - y) * row, (size - y) * row), y * row);
+    const [cw, ch] = cropOf(aspect), w = Math.round(size * cw), h = Math.round(size * ch), x0 = (size - w) >> 1, y0 = (size - h) >> 1;
+    const buf = new Uint8Array(w * h * 4);
+    gl.readRenderTargetPixels(outRT, x0, y0, w, h, buf);
+    const img = new ImageData(w, h), row = w * 4;
+    for (let y = 0; y < h; y++) img.data.set(buf.subarray((h - 1 - y) * row, (h - y) * row), y * row);
     return img;
   }
+
+  // Roblox's default sky (six DDS faces in the local install) as the reflection/lighting environment.
+  // faces: canvases in three's cube order (+x, -x, +y, -y, +z, -z).
+  setSky(faces) {
+    const cube = new THREE.CubeTexture(faces);
+    cube.colorSpace = THREE.SRGBColorSpace;
+    cube.needsUpdate = true;
+    this.skyEnv = new THREE.PMREMGenerator(this.gl).fromCubemap(cube).texture;
+    cube.dispose();
+  }
 }
+
+// Width and height of the visible crop as fractions of the square render.
+export const cropOf = (aspect = 1) => (aspect >= 1 ? [1, 1 / aspect] : [aspect, 1]);
 
 function srgbVec(color) { const t = {}; color.getRGB(t, THREE.SRGBColorSpace); return new THREE.Vector3(t.r, t.g, t.b); }
 function concat(a, b) { const o = new Float32Array(a.length + b.length); o.set(a); o.set(b, a.length); return o; }

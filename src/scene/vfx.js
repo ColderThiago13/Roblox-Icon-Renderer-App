@@ -2,7 +2,7 @@
 // Everything renders premultiplied so LightEmission blends between alpha (0) and additive (1) like Roblox.
 // Built once per file; update(time) re-simulates cheaply so the timeline can scrub and play.
 import * as THREE from 'three';
-import { loadTexture, textureFrom } from './assets.js';
+import { loadTexture, loadImage, textureFrom } from './assets.js';
 import { worldMatrix, isPart, color3 } from './build.js';
 import { nameOf } from '../rbx/instance.js';
 
@@ -53,7 +53,7 @@ const colSeq = (c) => (Array.isArray(c) ? c : [{ t: 0, c }, { t: 1, c }]);
 // Shared ribbon shading and sequence sampling for Trails.
 export { evalNumSeq, evalColorSeq, numSeq, colSeq, vfxMaterial, beamVS, beamFS, inPart };
 
-// ---------- procedural stand-ins for built-in rbxasset:// textures ----------
+// ---------- procedural stand-ins for built-in rbxasset:// textures (when Roblox isn't installed) ----------
 const procCache = new Map();
 function procTexture(kind) {
   if (procCache.has(kind)) return procCache.get(kind);
@@ -85,9 +85,23 @@ function procTexture(kind) {
   return t;
 }
 
+// Roblox's fire texture keeps the flame shape in alpha; its brown RGB is replaced by Fire.Color, so draw it white.
+function alphaOnly(img) {
+  const c = Object.assign(document.createElement('canvas'), { width: img.naturalWidth || img.width, height: img.naturalHeight || img.height }), g = c.getContext('2d');
+  g.drawImage(img, 0, 0);
+  const d = g.getImageData(0, 0, c.width, c.height);
+  for (let i = 0; i < d.data.length; i += 4) d.data[i] = d.data[i + 1] = d.data[i + 2] = 255;
+  g.putImageData(d, 0, 0);
+  return textureFrom(c);
+}
+
 async function textureFor(url, fallbackKind, warn, label) {
   if (url && /rbxassetid:|[?&]id=\d/i.test(url)) {
     try { return await loadTexture(url); } catch (e) { warn(`${label}: ${e.message}`); }
+  }
+  // Built-in textures come from the local Roblox install; without one, the look-alikes below stand in.
+  if (url && /^\s*rbxasset:\/\//i.test(url)) {
+    try { return /fire_main/i.test(url) ? alphaOnly(await loadImage(url)) : await loadTexture(url); } catch { /* not installed */ }
   }
   if (url && /sparkle/i.test(url)) return procTexture('sparkle');
   if (url && /smoke/i.test(url)) return procTexture('smoke');
@@ -121,18 +135,18 @@ function emitterConfig(inst) {
   const base = { enabled: p.enabled !== false, emitCount: 0, emitDelay: 0, spread: { x: 15, y: 15 }, drag: 0, rotation: { min: 0, max: 360 }, rotSpeed: { min: -30, max: 30 }, brightness: 1, zOffset: 0, orientation: 0, emissionDir: 1, shape: 0, shapeStyle: 0, shapeInOut: 0, flipLayout: 0, timeScale: 1, squash: numSeq(0) };
   if (inst.className === 'Fire') {
     const size = p.size_xml ?? p.size ?? 5, heat = p.heat_xml ?? p.heat ?? 9;
-    return { ...base, texture: null, fallback: 'fire', rate: 65, lifetime: { min: 0.5, max: 1 }, speed: { min: heat * 0.4, max: heat * 0.6 }, accel: { x: 0, y: heat * 0.3, z: 0 },
+    return { ...base, texture: 'rbxasset://textures/particles/fire_main.dds', fallback: 'fire', rate: 65, lifetime: { min: 0.5, max: 1 }, speed: { min: heat * 0.4, max: heat * 0.6 }, accel: { x: 0, y: heat * 0.3, z: 0 },
       size: [{ t: 0, v: size * 0.6, e: 0.1 }, { t: 1, v: size * 0.15, e: 0 }], transparency: [{ t: 0, v: 0.2, e: 0 }, { t: 1, v: 1, e: 0 }],
       color: [{ t: 0, c: p.color ?? { r: 0.93, g: 0.5, b: 0.2 } }, { t: 1, c: p.secondarycolor ?? { r: 0.55, g: 0.31, b: 0.18 } }], lightEmission: 0.85 };
   }
   if (inst.className === 'Smoke') {
     const size = p.size_xml ?? p.size ?? 1, rise = p.risevelocity_xml ?? p.risevelocity ?? 1, op = p.opacity_xml ?? p.opacity ?? 0.5;
-    return { ...base, texture: null, fallback: 'smoke', rate: 20, lifetime: { min: 3, max: 5 }, speed: { min: rise, max: rise * 1.2 }, accel: { x: 0, y: 0, z: 0 },
+    return { ...base, texture: 'rbxasset://textures/particles/smoke_main.dds', fallback: 'smoke', rate: 20, lifetime: { min: 3, max: 5 }, speed: { min: rise, max: rise * 1.2 }, accel: { x: 0, y: 0, z: 0 },
       size: [{ t: 0, v: size, e: 0.2 }, { t: 1, v: size * 3, e: 0.2 }], transparency: [{ t: 0, v: 1 - op, e: 0 }, { t: 1, v: 1, e: 0 }],
       color: colSeq(p.color ?? { r: 1, g: 1, b: 1 }), lightEmission: 0, spread: { x: 20, y: 20 } };
   }
   // Sparkles
-  return { ...base, texture: 'sparkle', fallback: 'sparkle', rate: 40, lifetime: { min: 0.8, max: 1.4 }, speed: { min: 2, max: 4 }, accel: { x: 0, y: 0, z: 0 },
+  return { ...base, texture: 'rbxasset://textures/particles/sparkles_main.dds', fallback: 'sparkle', rate: 40, lifetime: { min: 0.8, max: 1.4 }, speed: { min: 2, max: 4 }, accel: { x: 0, y: 0, z: 0 },
     size: [{ t: 0, v: 0.6, e: 0.2 }, { t: 1, v: 0.1, e: 0 }], transparency: [{ t: 0, v: 0, e: 0 }, { t: 1, v: 1, e: 0 }],
     color: colSeq(p.sparklecolor ?? { r: 0.56, g: 0.34, b: 1 }), lightEmission: 1, spread: { x: 180, y: 180 } };
 }

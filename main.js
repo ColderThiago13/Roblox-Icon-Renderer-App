@@ -3,6 +3,8 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import { createConnection } from 'node:net';
+import http from 'node:http';
+import { exec } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import updaterPkg from 'electron-updater';
 
@@ -75,7 +77,9 @@ ipcMain.handle('asset:get', async (_e, id) => {
 let robloxContent = null; // one shared lookup, however many requests arrive at once
 function robloxContentDir() {
   robloxContent ??= (async () => {
-    const roots = [path.join(process.env.LOCALAPPDATA || '', 'Roblox', 'Versions'), path.join(process.env['ProgramFiles(x86)'] || '', 'Roblox', 'Versions')];
+    const local = process.env.LOCALAPPDATA || '';
+    const roots = [path.join(local, 'Roblox', 'Versions'), path.join(process.env['ProgramFiles(x86)'] || '', 'Roblox', 'Versions'),
+      ...['Bloxstrap', 'Fishstrap', 'Voidstrap'].map((b) => path.join(local, b, 'Versions'))]; // bootstrapper-only installs
     let best = null;
     for (const root of roots) {
       for (const d of await fs.readdir(root).catch(() => [])) {
@@ -91,9 +95,13 @@ function robloxContentDir() {
 ipcMain.handle('rbxasset:get', async (_e, rel) => {
   const dir = await robloxContentDir();
   if (!dir) throw new Error(`rbxasset://${rel} needs Roblox Studio or the Roblox player installed`);
-  const file = path.normalize(path.join(dir, String(rel)));
-  if (!file.startsWith(dir + path.sep)) throw new Error('Bad rbxasset path');
-  return fs.readFile(file);
+  // Like Roblox, rbxasset://textures/… also resolves into PlatformContent/pc (studs, sky, plastic).
+  for (const root of [dir, path.join(dir, '..', 'PlatformContent', 'pc')]) {
+    const file = path.normalize(path.join(root, String(rel)));
+    if (!file.startsWith(path.normalize(root) + path.sep)) throw new Error('Bad rbxasset path');
+    try { return await fs.readFile(file); } catch { /* try the next root */ }
+  }
+  throw new Error(`rbxasset://${rel} is not in your Roblox install`);
 });
 ipcMain.handle('rbxasset:list', async (_e, rel) => {
   const dir = await robloxContentDir();
@@ -101,6 +109,217 @@ ipcMain.handle('rbxasset:list', async (_e, rel) => {
   const folder = path.normalize(path.join(dir, String(rel)));
   if (!folder.startsWith(dir + path.sep)) throw new Error('Bad rbxasset path');
   return fs.readdir(folder).catch(() => []);
+});
+
+// Catalog name for "Add by ID" (public endpoint; falls back to the id).
+ipcMain.handle('asset:name', async (_e, id) => {
+  if (!/^\d+$/.test(String(id))) return null;
+  try {
+    const r = await net.fetch(`https://economy.roblox.com/v2/assets/${id}/details`);
+    return r.ok ? ((await r.json()).Name || null) : null;
+  } catch { return null; }
+});
+
+// ---------- Roblox Studio plugin ----------
+// The app installs src/studio/plugin.lua into Studio's local plugins folder. Its "Send to Renderer" button posts the
+// selection to this localhost server, one file per selected instance.
+const STUDIO_PORT = +process.env.RIR_PORT || 47823; // ponytail: fixed port shared with plugin.lua and src/mcp/server.mjs; make it configurable if it ever collides
+const PLUGIN_SRC = path.join(ROOT, 'src', 'studio', 'plugin.lua');
+const PLUGIN_DST = () => path.join(process.env.LOCALAPPDATA || '', 'Roblox', 'Plugins', 'RobloxIconRenderer.lua');
+const pluginVersion = (text) => +(String(text).match(/rir-plugin-version:\s*(\d+)/)?.[1] ?? 0);
+// Toolbar icons must be rbxasset:// paths, so the icon goes into each Studio install's content folder
+// (again after a Studio update, on the next app launch).
+async function copyPluginIcon() {
+  const root = path.join(process.env.LOCALAPPDATA || '', 'Roblox', 'Versions');
+  for (const d of await fs.readdir(root).catch(() => [])) {
+    const dir = path.join(root, d), icon = path.join(dir, 'content', 'textures', 'RobloxIconRenderer', 'icon.png');
+    if (!fsSync.existsSync(path.join(dir, 'RobloxStudioBeta.exe')) || fsSync.existsSync(icon)) continue;
+    await fs.mkdir(path.dirname(icon), { recursive: true });
+    await fs.writeFile(icon, nativeImage.createFromPath(path.join(ROOT, 'build', 'icon.png')).resize({ width: 64, height: 64 }).toPNG());
+  }
+}
+async function pluginStatus() {
+  const bundled = pluginVersion(await fs.readFile(PLUGIN_SRC, 'utf8'));
+  const text = await fs.readFile(PLUGIN_DST(), 'utf8').catch(() => null);
+  return { installed: text != null, current: text != null && pluginVersion(text) >= bundled, version: bundled };
+}
+ipcMain.handle('plugin:status', pluginStatus);
+ipcMain.handle('plugin:install', async () => {
+  await fs.mkdir(path.dirname(PLUGIN_DST()), { recursive: true });
+  await fs.copyFile(PLUGIN_SRC, PLUGIN_DST());
+  await copyPluginIcon().catch(() => {});
+  return pluginStatus();
+});
+ipcMain.handle('plugin:open', async () => { await fs.mkdir(path.dirname(PLUGIN_DST()), { recursive: true }); shell.openPath(path.dirname(PLUGIN_DST())); });
+
+// ---------- local API (127.0.0.1 only) ----------
+// POST /studio         the plugin's Send to Renderer button: { items: [{ name, key, data (base64 rbxm) }] }
+// GET  /studio/poll    the plugin's agent link: waits up to 15 s for a command from an AI agent
+// POST /studio/result  the plugin's answer to that command: { id, ok, data | error }
+// POST /agent          AI agent tool calls from src/mcp/server.mjs: { method, params } -> { ok, result | error }
+// Every request needs the X-RIR header and a 127.0.0.1/localhost Host: web pages can't send either cross-origin.
+const studioItems = (items) => (Array.isArray(items) ? items : []).filter((i) => typeof i?.data === 'string')
+  .map((i) => ({ name: String(i.name || 'Studio selection').slice(0, 100), key: String(i.key ?? ''), bytes: Buffer.from(i.data, 'base64') }));
+
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => { size += c.length; if (size > 512 * 2 ** 20) { reject(new Error('too large')); req.destroy(); } else chunks.push(c); });
+    req.on('end', () => { try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); } catch { reject(new Error('bad json')); } });
+    req.on('error', reject);
+  });
+}
+
+// Agent calls run in the page (src/ui/agent.js), which owns the files and the renderer.
+let agentSeq = 0;
+const agentPending = new Map();
+ipcMain.on('agent:reply', (_e, id, ok, result) => {
+  const p = agentPending.get(id);
+  if (p) { agentPending.delete(id); ok ? p.resolve(result) : p.reject(new Error(result)); }
+});
+// The page says when its handler is listening; calls wait for that (an app an agent just launched is still loading).
+let agentReady, markAgentReady;
+const resetAgentReady = () => { agentReady = new Promise((r) => { markAgentReady = r; }); };
+resetAgentReady();
+ipcMain.on('agent:ready', () => markAgentReady());
+async function agentCall(method, params) {
+  if (!mainWin || mainWin.isDestroyed()) throw new Error('The app window is closed');
+  await Promise.race([agentReady, new Promise((_, reject) => setTimeout(() => reject(new Error('The app is still starting; try again')), 60000))]);
+  return new Promise((resolve, reject) => {
+    const id = ++agentSeq, timer = setTimeout(() => { agentPending.delete(id); reject(new Error(`${method} timed out`)); }, 15 * 60 * 1000);
+    agentPending.set(id, { resolve: (v) => { clearTimeout(timer); resolve(v); }, reject: (e) => { clearTimeout(timer); reject(e); } });
+    mainWin.webContents.send('agent:call', { id, method, params });
+  });
+}
+
+// Studio link: the plugin long-polls for commands, so agents can browse Studio and import models on demand.
+const studio = { queue: [], pollers: [], lastPoll: 0, pending: new Map(), seq: 0 };
+const studioLinked = () => studio.pollers.length > 0 || Date.now() - studio.lastPoll < 20000;
+function studioPoll(res, reply) {
+  studio.lastPoll = Date.now();
+  if (studio.queue.length) return reply(200, studio.queue.shift());
+  const waiter = { reply, timer: setTimeout(() => { studio.pollers = studio.pollers.filter((w) => w !== waiter); reply(200, {}); }, 15000) };
+  studio.pollers.push(waiter);
+  res.on('close', () => { clearTimeout(waiter.timer); studio.pollers = studio.pollers.filter((w) => w !== waiter); });
+}
+function studioCommand(type, params = {}, timeout = 60000) {
+  if (!studioLinked()) return Promise.reject(new Error('Roblox Studio is not linked. Open Studio with the Roblox Icon Renderer plugin installed and up to date (the app\'s toolbar or Settings > Roblox Studio), and keep its "Agent Link" button on.'));
+  return new Promise((resolve, reject) => {
+    const cmd = { id: ++studio.seq, type, ...params };
+    const timer = setTimeout(() => {
+      studio.pending.delete(cmd.id);
+      studio.queue = studio.queue.filter((c) => c !== cmd);
+      reject(new Error('Roblox Studio did not answer in time (is it busy or playtesting?)'));
+    }, timeout);
+    studio.pending.set(cmd.id, { resolve: (v) => { clearTimeout(timer); resolve(v); }, reject: (e) => { clearTimeout(timer); reject(e); } });
+    const w = studio.pollers.shift();
+    if (w) { clearTimeout(w.timer); w.reply(200, cmd); } else studio.queue.push(cmd);
+  });
+}
+
+async function agentMethod(method, params) {
+  switch (method) {
+    case 'status': {
+      const plugin = await pluginStatus().catch(() => null);
+      return { app: 'Roblox Icon Renderer', version: app.getVersion(), studioLinked: studioLinked(), studioPlugin: plugin, ...(await agentCall('status', {})) };
+    }
+    case 'studioStatus': return { linked: studioLinked(), plugin: await pluginStatus().catch(() => null) };
+    case 'studioBrowse': return studioCommand('browse', { target: params.id ?? null, depth: Math.min(6, Math.max(1, +params.depth || 2)) });
+    case 'studioSelection': return studioCommand('selection');
+    case 'studioImport': {
+      const data = await studioCommand('import', { ids: [].concat(params.ids ?? []).map(String), selection: !!params.selection }, 180000);
+      const files = data?.items?.length ? await agentCall('importStudioItems', { items: studioItems(data.items) }) : [];
+      return { files, errors: data?.errors ?? [] };
+    }
+    default: return agentCall(method, params);
+  }
+}
+
+function startLocalServer() {
+  const server = http.createServer(async (req, res) => {
+    const reply = (code, body) => { if (!res.headersSent) { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); } };
+    if (req.headers['x-rir'] !== '1' || !/^(127\.0\.0\.1|localhost):\d+$/.test(req.headers.host ?? '')) return reply(404, { error: 'not found' });
+    const route = `${req.method} ${req.url}`;
+    try {
+      if (route === 'GET /studio/poll') return studioPoll(res, reply);
+      const body = await readJson(req);
+      if (route === 'POST /studio') {
+        if (!mainWin) return reply(503, { error: 'not ready' });
+        const files = studioItems(body.items);
+        mainWin.webContents.send('studio:items', files);
+        showWindow();
+        return reply(200, { ok: true, count: files.length });
+      }
+      if (route === 'POST /studio/result') {
+        const p = studio.pending.get(body.id);
+        if (p) { studio.pending.delete(body.id); body.ok ? p.resolve(body.data) : p.reject(new Error(String(body.error || 'Studio error'))); }
+        return reply(200, { ok: true });
+      }
+      if (route === 'POST /agent') {
+        try { return reply(200, { ok: true, result: await agentMethod(String(body.method), body.params ?? {}) }); }
+        catch (e) { return reply(200, { ok: false, error: e.message }); }
+      }
+      reply(404, { error: 'not found' });
+    } catch (e) { reply(e.message === 'too large' ? 413 : 400, { error: e.message }); }
+  });
+  server.on('error', (e) => console.error('Local API:', e.message)); // port taken: the plugin and agents say they can't reach the app
+  server.listen(STUDIO_PORT, '127.0.0.1');
+}
+
+// Files agents open by path: only models and images.
+const LOCAL_KINDS = { model: /\.(rbxmx?|obj)$/i, image: /\.(png|jpe?g|webp|gif|bmp)$/i };
+ipcMain.handle('file:readLocal', (_e, filePath, kind) => {
+  if (!LOCAL_KINDS[kind]?.test(String(filePath))) throw new Error(`Only ${kind === 'image' ? 'image' : '.rbxm, .rbxmx or .obj'} files can be opened`);
+  return fs.readFile(path.resolve(String(filePath)));
+});
+
+// ---------- AI agent setup (MCP) ----------
+// Agents launch src/mcp/server.mjs with this app's own executable as Node (ELECTRON_RUN_AS_NODE), so nothing else
+// needs installing. One click writes that into Claude Code, Codex or Claude Desktop.
+const MCP_NAME = 'roblox-icon-renderer';
+const mcpCommand = () => ({ command: process.execPath, args: [path.join(ROOT, 'src', 'mcp', 'server.mjs')], env: { ELECTRON_RUN_AS_NODE: '1' } });
+const CODEX_CONFIG = () => path.join(process.env.CODEX_HOME || path.join(app.getPath('home'), '.codex'), 'config.toml');
+const DESKTOP_CONFIG = () => path.join(app.getPath('appData'), 'Claude', 'claude_desktop_config.json');
+const readText = (f) => fs.readFile(f, 'utf8').catch(() => null);
+const jsonHas = (text) => { try { return !!JSON.parse(text)?.mcpServers?.[MCP_NAME]; } catch { return false; } };
+const writeAtomic = async (file, text) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file + '.tmp', text); await fs.rename(file + '.tmp', file); };
+
+ipcMain.handle('agent:status', async () => ({
+  claude: jsonHas(await readText(path.join(app.getPath('home'), '.claude.json'))),
+  codex: !!(await readText(CODEX_CONFIG()))?.includes(`[mcp_servers.${MCP_NAME}]`),
+  desktop: jsonHas(await readText(DESKTOP_CONFIG())),
+  desktopInstalled: fsSync.existsSync(path.dirname(DESKTOP_CONFIG())),
+  config: { mcpServers: { [MCP_NAME]: mcpCommand() } },
+}));
+ipcMain.handle('agent:setup', async (_e, client) => {
+  const { command, args } = mcpCommand();
+  if (client === 'claude') {
+    // Through the Claude Code CLI, which owns ~/.claude.json. Re-adding replaces an older entry.
+    const run = (cmd) => new Promise((resolve, reject) => exec(cmd, { timeout: 60000, windowsHide: true }, (err, stdout, stderr) => (err ? reject(new Error((stderr || err.message).trim())) : resolve(stdout))));
+    await run(`claude mcp remove --scope user ${MCP_NAME}`).catch(() => {});
+    try { await run(`claude mcp add --scope user ${MCP_NAME} -e ELECTRON_RUN_AS_NODE=1 -- "${command}" "${args[0]}"`); }
+    catch (e) { throw new Error(/not recognized|not found|ENOENT/i.test(e.message) ? 'The Claude Code CLI (claude) was not found. Install Claude Code, or use "Copy config".' : e.message); }
+  } else if (client === 'codex') {
+    const file = CODEX_CONFIG(), old = (await readText(file)) ?? '';
+    // Drop an older [mcp_servers.roblox-icon-renderer] table (and its subtables), then append the current one.
+    const kept = [], header = `[mcp_servers.${MCP_NAME}`;
+    let skipping = false;
+    for (const line of old.split(/\r?\n/)) {
+      const t = line.trim();
+      if (t.startsWith('[')) skipping = t.startsWith(header + ']') || t.startsWith(header + '.');
+      if (!skipping) kept.push(line);
+    }
+    const block = [`${header}]`, `command = '${command}'`, `args = ['${args[0]}']`, 'env = { ELECTRON_RUN_AS_NODE = "1" }'];
+    await writeAtomic(file, `${kept.join('\n').trimEnd()}\n\n${block.join('\n')}\n`.trimStart());
+  } else if (client === 'desktop') {
+    const file = DESKTOP_CONFIG();
+    let cfg = {};
+    try { cfg = JSON.parse((await readText(file)) ?? '{}'); } catch { throw new Error(`${file} is not valid JSON; fix it or use "Copy config"`); }
+    cfg.mcpServers = { ...cfg.mcpServers, [MCP_NAME]: mcpCommand() };
+    await writeAtomic(file, JSON.stringify(cfg, null, 2));
+  } else throw new Error(`Unknown client ${client}`);
+  return true;
 });
 
 ipcMain.handle('config:get', async () => {
@@ -277,12 +496,13 @@ app.whenReady().then(async () => {
     title: 'Roblox Icon Renderer',
     icon: path.join(ROOT, 'build', 'icon.png'),
     autoHideMenuBar: true,
-    webPreferences: { preload: path.join(ROOT, 'preload.cjs'), contextIsolation: true, sandbox: true },
+    webPreferences: { preload: path.join(ROOT, 'preload.cjs'), contextIsolation: true, sandbox: true, backgroundThrottling: false }, // agents render while it's hidden
   });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (e) => e.preventDefault());
   win.loadURL('app://local/index.html');
   mainWin = win;
+  win.webContents.on('did-start-loading', resetAgentReady);
   win.on('close', (e) => { if (prefs.closeToTray && !quitting) { e.preventDefault(); win.hide(); } }); // tray menu / updates still quit
   // Always in the notification area ("hidden icons"); the toolbar's tray button hides the window there.
   tray = new Tray(nativeImage.createFromPath(path.join(ROOT, 'build', 'icon.png')).resize({ width: 16, height: 16 }));
@@ -291,6 +511,8 @@ app.whenReady().then(async () => {
   tray.setContextMenu(Menu.buildFromTemplate([{ label: 'Show Roblox Icon Renderer', click: showWindow }, { type: 'separator' }, { label: 'Quit', click: () => app.quit() }]));
   setupUpdates(win);
   if (!process.env.RIR_TEST_FILES) { discordConnect(); setInterval(discordConnect, 15000); }
+  if (!process.env.RIR_TEST_FILES || process.env.RIR_TEST_STUDIO) startLocalServer();
+  if ((await pluginStatus().catch(() => null))?.installed) copyPluginIcon().catch(() => {}); // Studio updated since
   if (process.env.RIR_DEVTOOLS) win.webContents.openDevTools({ mode: 'detach' });
   if (process.env.RIR_TEST_FILES) win.webContents.once('did-finish-load', () => renderTest(win));
 });

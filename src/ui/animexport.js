@@ -47,3 +47,17 @@ export function opaqueSamples(data, max, out = []) {
   for (let i = 0; i < data.length; i += 4 * stride) if (data[i + 3] >= 128) out.push(data[i], data[i + 1], data[i + 2], 255);
   return out;
 }
+
+// Turntable framing: copies of the clip's framing points turned about the vertical axis through their center,
+// so every camera yaw fits the same way and the model doesn't breathe in and out as it spins.
+export function spinFit(fit, steps = 24) {
+  const p = fit.points, stride = Math.max(1, Math.ceil(p.length / 3 / 20000)) * 3;
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (let i = 0; i < p.length; i += 3) { x0 = Math.min(x0, p[i]); x1 = Math.max(x1, p[i]); z0 = Math.min(z0, p[i + 2]); z1 = Math.max(z1, p[i + 2]); }
+  const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, out = [];
+  for (let k = 0; k < steps; k++) {
+    const c = Math.cos((2 * Math.PI * k) / steps), sn = Math.sin((2 * Math.PI * k) / steps);
+    for (let i = 0; i < p.length; i += stride) { const dx = p[i] - cx, dz = p[i + 2] - cz; out.push(cx + dx * c - dz * sn, p[i + 1], cz + dx * sn + dz * c); }
+  }
+  return { ...fit, points: new Float32Array(out) };
+}

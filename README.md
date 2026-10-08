@@ -16,10 +16,16 @@ Installs per user (no admin needed) with Desktop and Start Menu shortcuts. Windo
 | :---: | :---: | :---: |
 | ![R6 skater with a background image and curved text](docs/example-holy-skate.png) | ![Hoverboard GIF with VFX and trails](docs/example-hoverboard.gif) | ![R6 skater animation GIF](docs/example-skate.gif) |
 
+| Material textures, studs and real union shapes | 360° turntable export |
+| :---: | :---: |
+| ![Wood, brick, cobblestone, grass, diamond plate, marble and corroded metal blocks, a studded block and a union](docs/feature-materials.png) | ![A classic fedora spinning on a turntable](docs/feature-turntable.gif) |
+
+![The app with the 16:9 export shape (the preview darkens what gets cropped) and the camera View menu open](docs/feature-shape-view.png)
+
 ## Quick start
 
 1. Install the Windows app using the download link above.
-2. Drop a `.rbxm`, `.rbxmx` or `.obj` file into the window. Set up **Roblox access…** if its meshes or textures need downloading.
+2. Drop a `.rbxm`, `.rbxmx` or `.obj` file into the window, add a catalog item with **ID**, or send your selection from Roblox Studio (see below). Set up **Roblox access…** if its meshes or textures need downloading.
 3. Drag to rotate, right-drag to move, and scroll to zoom. Hold **Ctrl** while scrolling for fine zoom adjustments, down to **0.01×**.
 4. Adjust the look in the settings panel, then choose **Export current…**. Check multiple files to export a batch.
 
@@ -33,6 +39,38 @@ Files only *reference* meshes and textures (`rbxassetid://…`). Since April 202
 Credentials are encrypted with the OS keychain (`safeStorage`) and only sent to roblox.com. Everything (credentials, settings, `asset-cache`) lives in `%APPDATA%\roblox-icon-renderer`, which updates and reinstalls keep. You can also put a file named after the asset ID into the asset cache folder to use it offline.
 
 If an asset can't be downloaded, the app still renders: missing meshes show as their bounding box, and every problem is listed under the preview.
+
+**Add by ID** (toolbar): paste asset IDs or catalog links (several at once become separate files). Models, accessories and gear download as they are; a bare mesh becomes a MeshPart sized to it.
+
+## Roblox Studio plugin
+
+The toolbar shows **Install plugin** until the plugin is installed, and **Update plugin** when a newer app version ships changes to it (also under Settings → Roblox Studio). It writes `RobloxIconRenderer.lua` to `%LOCALAPPDATA%\Roblox\Plugins`; restart Studio if it was open.
+
+In Studio, select one or more models, parts or effects and click **Plugins → Send to Renderer**. Each selected item arrives as its **own render**. Sending the same item again replaces that render's model and keeps its settings, so you can tweak in Studio and re-send. Studio asks once to allow the plugin to reach `127.0.0.1` (the app listens only on this computer, port 47823).
+
+![Settings → Roblox Studio: install, update or reinstall the plugin](docs/feature-studio-plugin.png)
+
+## AI agents (MCP)
+
+AI agents such as **Claude Code**, **Codex**, **Claude Desktop** or any [MCP](https://modelcontextprotocol.io) client can drive the app: pick models in Roblox Studio (or by catalog ID, or from disk), style them, look at previews of their own work, and export icons, images, GIFs and videos.
+
+**Connect:** Settings → **AI agents** → *Connect Claude Code* / *Connect Codex* / *Connect Claude Desktop*, then restart the agent or start a new session. *Copy config (other apps)* copies the `mcpServers` JSON for any other client. The server runs with the app's own executable, so nothing else needs installing, and the app starts by itself when an agent needs it.
+
+Manual setup, if you prefer (paths from a default install):
+
+```sh
+claude mcp add --scope user roblox-icon-renderer -e ELECTRON_RUN_AS_NODE=1 -- "%LOCALAPPDATA%\Programs\Roblox Icon Renderer\Roblox Icon Renderer.exe" "%LOCALAPPDATA%\Programs\Roblox Icon Renderer\resources\app\src\mcp\server.mjs"
+```
+
+Then just ask, e.g. *"Import my selected models from Studio, make a 512 px icon of each with a 3/4 view, a thick black outline and a dark blue gradient background, check them, and export them to D:\Icons"*.
+
+Tools: `get_status`, `list_files`, `add_file`, `add_assets`, `remove_files`, `select_file`, `get_model_tree`, `set_parts_disabled`, `split_models`, `get_schema`, `get_settings`, `set_settings` (any render setting, text layers and camera views, checked against the schema), `set_background_image`, `list_profiles`, `apply_profile`, `save_profile`, `set_animation`, `preview` (returns the image), `export_images`, `export_animation` (PNG sequence, sprite sheet, GIF, MP4, WebM, turntable), and for Studio `studio_status`, `studio_selection`, `studio_browse`, `studio_import`.
+
+**Studio:** the plugin (version 2 and up) has an **Agent Link** button, on by default, so agents can browse the open place, read the selection and import instances (each as its own file). Turn it off to keep agents out of Studio.
+
+![Settings → AI agents: one-click connection for Claude Code, Codex and Claude Desktop](docs/feature-ai-agents.png)
+
+Everything stays on this computer: the app's API listens only on `127.0.0.1` and refuses requests that don't come from the plugin or the MCP server. Agents can open model and image files and write exports to folders they choose.
 
 ## Features
 
@@ -49,8 +87,10 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 - Thin parts and flat meshes (cards, leaves, blades) render from both sides, and zero-thickness parts no longer turn black. MeshParts with `DoubleSided` render both sides too.
 - Parts: Block, Ball, Cylinder, Wedge and CornerWedge shapes; WedgePart, CornerWedgePart, MeshPart, SpecialMesh (FileMesh, Brick, Sphere, Cylinder, Head, Wedge), BlockMesh and CylinderMesh.
 - FileMesh versions 1.00 to 7.00, including Draco-compressed v7. Only the highest-detail LOD is drawn.
-- Materials: color, transparency, reflectance and material type (Neon glows through bloom; Glass, metals, ForceField).
-- Textures: `TextureID`, where the part color shows through transparent pixels as in Roblox. SurfaceAppearance (color, normal, roughness and metalness maps; Overlay and Transparency alpha modes). Decals, and Textures with stud tiling.
+- Materials: color, transparency, reflectance and material type (Neon glows through bloom; Glass, metals, ForceField). **Material textures** (wood grain, brick, metal, grass, …): Roblox's own color, normal, roughness and metalness maps for 38 base materials, downloaded like any asset and tinted by the part color. **MaterialVariants** saved in the file (e.g. a `MaterialService` folder in the model) are applied by name, with their StudsPerTile.
+- Legacy **surfaces**: Studs, Inlets, Universal and Weld/Glue faces on blocks and wedges, from Roblox's own studs texture.
+- **Unions** (UnionOperation/IntersectOperation/NegateOperation): the real union shape, from the baked mesh saved inline or in the asset its `AssetId` points to. `UsePartColor` off keeps each piece's own color.
+- Textures: `TextureID`, where the part color shows through transparent pixels as in Roblox. SurfaceAppearance (color, normal, roughness, metalness and emissive maps, from the classic properties, the newer `*Content` properties or a `TexturePack`; Overlay and Transparency alpha modes). Decals, and Textures with stud tiling.
 - Avatar appearance: **BodyColors** on R6/R15 body parts (including legacy BrickColor values), classic **Shirt**, **Pants**, and **ShirtGraphic** T-shirts. Pants draw under shirts on the torso; transparent clothing pixels reveal the body or existing mesh texture. R15 segments share the clothing image across each limb instead of repeating it.
 - **Classic R6 bodies** (a Humanoid with block Torso/arms/legs) render like Studio: Roblox's chamfered limb meshes, with body colors, pants, shirt and T-shirt composited into one texture using Roblox's own layout. These files, the classic head mesh and built-in `rbxasset://` files such as the default face are read from your local Roblox Studio or Roblox player install; without one, an equivalent chamfered shape with a box-projected template is used and a warning says so.
 - R6 **CharacterMesh** body replacements with base and overlay textures, including the newer Content properties. Accessories and face decals keep their existing textures and follow rig poses.
@@ -62,6 +102,7 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 - LightInfluence > 0 effects are lit by **Scene light for lit VFX** (default 2 ≈ Studio daylight); Brightness applies to the unlit part.
 - `EmitCount` / `EmitDelay` attributes (a common VFX-pack convention) fire a burst at `EmitDelay` seconds on the timeline.
 - Beam: bezier curve, widths, sequences, texture modes and TextureSpeed scrolling. The texture runs top→bottom from Attachment0 to Attachment1; with FaceCamera off the width follows the attachments' Y axes. Fire, Smoke and Sparkles.
+- Built-in `rbxasset://` textures (the default ParticleEmitter sparkle, Fire, Smoke and Sparkles) come from your local Roblox install; without one, procedural look-alikes stand in.
 - PointLight, SpotLight and SurfaceLight. Highlight (fill plus a 2D outline).
 
 **Trails**
@@ -77,8 +118,8 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 - Attachments placed directly in a Model are positioned from the Model's pivot, like Roblox.
 
 **Rendering and post-processing**
-- Camera: auto-fit framing, rotation, tilt, roll, zoom, offset, perspective or orthographic.
-- Lighting: tone mapping (Neutral, ACES, AgX), key/fill/rim lights, ambient, environment reflections, self shadows, ground shadow.
+- Camera: auto-fit framing, rotation, tilt, roll, zoom, offset, perspective or orthographic. **View ▾** (under the preview) jumps to Front, 3/4, Side, Back, Top or Tilt.
+- Lighting: tone mapping (Neutral, ACES, AgX), key/fill/rim lights, ambient, environment reflections, self shadows, ground shadow. Both off by default: **Preset** (Studio, Future, ShadowMap, Voxel, Showcase, Dramatic) writes a starting set of lighting and shadow values you can keep editing, and **Roblox sky reflections** lights and reflects with Roblox's default sky from your local install.
 - Bloom with threshold, strength and radius. Brightness, contrast, saturation, hue, gamma, temperature.
 - Color overlay: solid, gradient or rainbow, with normal, multiply, screen, overlay or tint blending.
 - Silhouette effects from a GPU distance field: outline, outer glow, drop shadow.
@@ -98,17 +139,21 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 - **Edit checked together** applies every change to all checked files.
 - **Profiles** (top of the settings panel): save the current settings under a name and apply them to any file later. Profiles live in `%APPDATA%\roblox-icon-renderer\profiles.json`, so updates keep them.
 - Per-section **Apply to all**, Copy/Paste, **To all files**, and **Default** (settings new files start with).
-- Export the current file, the checked files or all files as PNG, WebP or JPEG at 256 to 4096 px, with optional 2× supersampling.
+- Export the current file, the checked files or all files as PNG, WebP or JPEG at 256 to 4096 px, with optional 2× supersampling. **Shape** picks square, 16:9 (e.g. 1920×1080 game thumbnails), 9:16, 4:3, 3:4 or 2:1; the size is the long side, the model is framed for that shape, and the preview darkens what the crop leaves out.
 - **Export animation…** renders a clip at exact frame times as a PNG sequence, a PNG sprite sheet with JSON frame data, or a GIF. Choose the frame size (64–4096 px), which clock advances (animation, VFX or both), start, duration, FPS and looping; sprite sheets can instead be sized as a **whole sheet** (1024–16384 px) so FPS and duration only change how small each frame is; the dialog shows the grid, frame size and sheet size as you edit; framing is locked across the clip by default. Works for the current, checked or all files, with progress and Cancel. GIFs use one shared palette, 1-bit transparency or a solid background, and are capped at 1024 px.
+- **Video**: the same dialog exports **MP4** (H.264, on a background color) or **WebM** (VP9, transparent or on a color), encoded frame by frame at exact timestamps.
+
+  ![Export animation: MP4/WebM video formats and the turntable option](docs/feature-video-export.png)
+
+- **Turntable**: the camera circles the model once over the clip (any format), with framing held steady for every angle.
 
 ## Known limitations
 
-- Unions (CSG) render as their bounding box. Their geometry lives in a separate obfuscated asset.
 - Classic clothing maps exactly on classic R6 bodies (with Roblox installed) and block bodies; rounded R15 and custom meshes use a box projection, so seams and curved surfaces may differ from Studio. Custom avatar UV layouts are not reproduced.
 - Layered clothing (WrapLayer/WrapTarget cage deformation), dynamic facial animation, and CurveAnimation are not supported. Layered accessories render their saved mesh shape, with a warning. HumanoidDescription assets must be applied in Studio before saving the model; this app renders the instances present in the file.
 - Trails use at most 128 motion segments over the file's Lifetime (up to 20 seconds); history resets at the beginning of animation playback. Script-driven world movement isn't stored in model files. Wrap and Static texture modes currently share the same attachment-relative tiling.
-- Material textures (wood grain, brick, …) are not reproduced; parts use flat color with per-material roughness and metalness.
-- Built-in `rbxasset://` particle textures are replaced with procedural look-alikes.
+- Plastic, SmoothPlastic, Neon, ForceField and Glass keep a flat look (Roblox builds those into the client). All base materials tile at one size (8 studs); Roblox doesn't publish per-material tile sizes.
+- MaterialVariants are only found when they're saved in the same file. Union shapes need the baked mesh Roblox saves with them; very old unions without one still render as their bounding box.
 - Highlight `DepthMode = Occluded` is drawn as AlwaysOnTop.
 
 ## References
@@ -117,3 +162,6 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 - FileMesh format: https://devforum.roblox.com/t/roblox-filemesh-format-specification/326114
 - Asset Delivery API: https://create.roblox.com/docs/cloud/reference/domains/assetdelivery
 - Test models: https://github.com/rojo-rbx/rbx-test-files
+- Base material texture IDs: https://create.roblox.com/docs/parts/materials
+- Union (CSGMDL) mesh layout, as read by https://github.com/chteau/rbx-native (MIT) and https://github.com/krakow10/rbx_mesh
+- Video muxing: [Mediabunny](https://github.com/Vanilagy/mediabunny) (MPL-2.0)

@@ -147,7 +147,8 @@ button.update:disabled { animation: none; opacity: .85; cursor: progress; }
 dialog .grid2 { display: grid; grid-template-columns: 1fr 1fr; column-gap: 14px; }
 dialog .grid2 label { margin: 6px 0; }
 dialog label.inline { flex-direction: row; align-items: center; }
-#animDlg:not([data-format="gif"]) .gifOnly, #animDlg:not([data-format="sheet"]) .sheetOnly { display: none; }
+#animDlg:not([data-format="sheet"]) .sheetOnly { display: none; }
+#animDlg:not([data-format="gif"]):not([data-format="webm"]) .bgSel, #animDlg:not([data-format="gif"]):not([data-format="webm"]):not([data-format="mp4"]) .bgColor { display: none; }
 #axProgressRow { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
 #axProgressRow[hidden] { display: none; }
 #axProgress { flex: 1; }
@@ -221,6 +222,13 @@ dialog label.inline { flex-direction: row; align-items: center; }
 .toolbar .iconBtn .uiIco { width: 17px; height: 17px; vertical-align: 0; }
 .ui-settings { --ico: url(icons/settings.png); } .ui-appearance { --ico: url(icons/appearance.png); } .ui-activity { --ico: url(icons/activity.png); }
 .ui-behavior { --ico: url(icons/behavior.png); } .ui-key { --ico: url(icons/key.png); } .ui-tray { --ico: url(icons/tray.png); }
+.ui-plugin { --ico: url(icons/plugin.png); } .ui-robot { --ico: url(icons/robot.png); } .ui-camera { --ico: url(icons/camera.png); } .ui-cloud { --ico: url(icons/cloud.png); }
+button.pluginBtn { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+button.pluginBtn[hidden] { display: none; }
+/* Non-square export shape: the preview stays square and darkens what the crop leaves out. */
+#aspectMask { position: absolute; pointer-events: none; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .5); outline: 1px dashed rgba(255, 255, 255, .7); }
+#aspectMask[hidden] { display: none; }
+#ctxMenu .menuHead { padding: 4px 10px 2px; font-size: 11px; color: var(--muted); }
 #settingsDlg { width: 640px; padding: 0; }
 #settingsDlg h2 { padding: 16px 20px 0; }
 .setWrap { display: grid; grid-template-columns: 180px 1fr; min-height: 320px; border-top: 1px solid var(--line); margin-top: 12px; }

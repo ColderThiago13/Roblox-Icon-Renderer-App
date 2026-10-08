@@ -9,7 +9,8 @@
     { "imports": {
       "three": "./node_modules/three/build/three.module.js",
       "three/addons/": "./node_modules/three/examples/jsm/",
-      "fzstd": "./node_modules/fzstd/esm/index.mjs"
+      "fzstd": "./node_modules/fzstd/esm/index.mjs",
+      "mediabunny": "./node_modules/mediabunny/dist/bundles/mediabunny.min.mjs"
     } }
   </script>
 </head>
@@ -35,8 +36,10 @@
   <header class="toolbar">
     <button id="addBtn" class="primary">Add files</button>
     <input id="fileInput" type="file" multiple accept=".rbxm,.rbxmx,.obj" hidden>
+    <button id="addIdBtn" title="Download a model, accessory, gear or mesh from Roblox by its asset ID or catalog link"><i class="uiIco ui-cloud"></i> ID</button>
     <span class="sep"></span>
-    <label>Size <select id="expSize"><option>256</option><option selected>512</option><option>1024</option><option>2048</option><option>4096</option></select></label>
+    <label title="Export size in pixels (the long side for non-square shapes)">Size <select id="expSize"><option>256</option><option selected>512</option><option>1024</option><option>1920</option><option>2048</option><option>4096</option></select></label>
+    <label title="Shape of exported images and videos; the preview darkens what is cropped away">Shape <select id="expAspect"><option value="1">1:1</option><option value="1.7778">16:9</option><option value="0.5625">9:16</option><option value="1.3333">4:3</option><option value="0.75">3:4</option><option value="2">2:1</option></select></label>
     <label>Format <select id="expFormat"><option value="png">PNG</option><option value="webp">WebP</option><option value="jpeg">JPEG</option></select></label>
     <label>Quality <select id="expSS"><option value="1">1x</option><option value="2" selected>2x SSAA</option></select></label>
     <button id="exportOne">Export current…</button>
@@ -47,6 +50,7 @@
     <span class="grow"></span>
     <span id="status"></span>
     <button id="updateBtn" class="update" hidden title="A newer version is available on GitHub"></button>
+    <button id="pluginBtn" class="pluginBtn" hidden title="Install the Roblox Studio plugin: its Send to Renderer button sends your selection here, one render per selected item"><i class="uiIco ui-plugin"></i> <span>Install plugin</span></button>
     <button id="credsBtn">Roblox access…</button>
     <button id="trayBtn" class="iconBtn" title="Hide to tray: the window goes to the notification area (Windows hidden icons). Click the tray icon to bring it back."><i class="uiIco ui-tray"></i></button>
     <button id="settingsBtn" class="iconBtn" title="Settings"><i class="uiIco ui-settings"></i></button>
@@ -67,7 +71,7 @@
     </aside>
 
     <section id="stage">
-      <div id="viewport" class="bg-checker"><canvas id="view"></canvas><div id="textSel" hidden><i data-h="scale" class="nw"></i><i data-h="scale" class="ne"></i><i data-h="scale" class="sw"></i><i data-h="scale" class="se"></i><i data-h="rotate" class="rot" title="Rotate (Shift snaps)"></i><i data-h="sx" class="e" title="Stretch width"></i><i data-h="sx" class="w" title="Stretch width"></i><i data-h="sy" class="n" title="Stretch height"></i><i data-h="sy" class="s" title="Stretch height"></i></div><textarea id="textEdit" hidden spellcheck="false" rows="1"></textarea></div>
+      <div id="viewport" class="bg-checker"><canvas id="view"></canvas><div id="aspectMask" hidden></div><div id="textSel" hidden><i data-h="scale" class="nw"></i><i data-h="scale" class="ne"></i><i data-h="scale" class="sw"></i><i data-h="scale" class="se"></i><i data-h="rotate" class="rot" title="Rotate (Shift snaps)"></i><i data-h="sx" class="e" title="Stretch width"></i><i data-h="sx" class="w" title="Stretch width"></i><i data-h="sy" class="n" title="Stretch height"></i><i data-h="sy" class="s" title="Stretch height"></i></div><textarea id="textEdit" hidden spellcheck="false" rows="1"></textarea></div>
       <div id="timeline" hidden>
         <button id="playBtn" class="chip" title="Play / pause VFX (Space)">▶</button>
         <button id="restartBtn" class="chip" title="Back to start">⏮</button>
@@ -92,6 +96,7 @@
         <button data-bg="black" class="chip">Black</button>
         <span class="grow"></span>
         <span class="tip">Drag: rotate · Right-drag: move · Wheel: zoom (Ctrl: fine) · Alt: background image</span>
+        <button id="viewBtn" title="Camera angle presets"><i class="uiIco ui-camera"></i> View ▾</button>
         <button id="reloadBtn" title="Re-download assets and rebuild">Reload file</button>
       </footer>
       <details id="warnBox" hidden><summary id="warnSummary"></summary><ul id="warnList"></ul></details>
@@ -162,7 +167,7 @@
       <h2>Export animation</h2>
       <div class="grid2">
         <label>Files <select id="axScope"><option value="current">Current file</option><option value="checked">Checked files</option><option value="all">All files</option></select></label>
-        <label>Format <select id="axFormat"><option value="png">PNG sequence</option><option value="sheet">PNG sprite sheet + JSON</option><option value="gif">GIF</option></select></label>
+        <label>Format <select id="axFormat"><option value="png">PNG sequence</option><option value="sheet">PNG sprite sheet + JSON</option><option value="gif">GIF</option><option value="mp4">MP4 video (H.264)</option><option value="webm">WebM video (VP9)</option></select></label>
         <label>Time source <select id="axSource" title="The rig animation and the VFX have separate clocks; choose which advance"><option value="both">Animation + VFX</option><option value="animation">Animation only</option><option value="vfx">VFX only</option></select></label>
         <label class="sheetOnly">Size by <select id="axSizeBy" title="Frame: each frame has a fixed size and the sheet grows with the frame count. Whole sheet: the sheet has a fixed size and frames shrink to fit."><option value="frame">Frame size</option><option value="sheet">Whole sheet</option></select></label>
         <label class="sheetOnly bySheet">Sheet size (px) <select id="axSheetSize"><option>1024</option><option>2048</option><option selected>4096</option><option>8192</option><option>16384</option></select></label>
@@ -172,15 +177,25 @@
         <label>Duration (s) <input id="axDuration" type="number" min="0.05" step="0.01" value="2"></label>
         <label class="inline"><input id="axLoop" type="checkbox" checked> Loop (skip the duplicate last frame)</label>
         <label class="inline"><input id="axLock" type="checkbox" checked> Lock framing across the clip</label>
+        <label class="inline" title="The camera circles the model once over the clip, starting from the current angle"><input id="axTurn" type="checkbox"> Turntable (360° camera orbit)</label>
         <label class="sheetOnly">Sheet columns (0 = auto) <input id="axCols" type="number" min="0" max="64" step="1" value="0"></label>
         <label class="sheetOnly">Padding (px) <input id="axPad" type="number" min="0" max="64" step="1" value="0"></label>
-        <label class="gifOnly">GIF background <select id="axGifBg"><option value="transparent">Transparent (1-bit edges)</option><option value="solid">Solid color</option></select></label>
-        <label class="gifOnly">Color <input id="axGifColor" type="color" value="#2b2d42"></label>
+        <label class="bgSel">Background <select id="axGifBg"><option value="transparent">Transparent</option><option value="solid">Solid color</option></select></label>
+        <label class="bgColor">Background color <input id="axGifColor" type="color" value="#2b2d42"></label>
       </div>
       <p id="axSheetInfo" class="sheetOnly"></p>
-      <p class="muted">Quality comes from the toolbar. GIFs are limited to 256 colors and 1024 px; soft glows look best on a solid background or as PNG.</p>
+      <p class="muted">Quality and shape come from the toolbar (sprite sheets keep square frames). GIFs are limited to 256 colors, 1-bit transparency and 1024 px. MP4 has no transparency; transparent WebM keeps it (Chrome, editors that read VP9 alpha).</p>
       <div id="axProgressRow" hidden><progress id="axProgress" max="1" value="0"></progress> <span id="axProgressLabel"></span></div>
       <div class="row"><span class="grow"></span><button id="axCancel" type="button">Close</button><button id="axGo" class="primary" type="button">Export…</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="idDlg">
+    <form method="dialog">
+      <h2>Add from Roblox</h2>
+      <label>Asset IDs or links <input id="idInput" type="text" autocomplete="off" placeholder="e.g. 1029025, rbxassetid://…, roblox.com/catalog/…"></label>
+      <p class="muted">Models, accessories, gear and meshes download with your Roblox access settings. Several IDs (separated by commas or spaces) become separate files.</p>
+      <div class="row"><span class="grow"></span><button value="cancel" formnovalidate>Cancel</button><button value="add" class="primary" id="idOk">Add</button></div>
     </form>
   </dialog>
 

@@ -6,6 +6,17 @@ const b = (key, label, def) => ({ key, label, type: 'bool', def });
 const c = (key, label, def) => ({ key, label, type: 'color', def });
 const s = (key, label, options, def) => ({ key, label, type: 'select', options, def });
 
+// Optional one-click looks: picking one writes these lighting/shadow values (then edit freely). 'none' changes nothing.
+// Approximations of Studio's Lighting.Technology modes plus two icon looks.
+export const LIGHTING_PRESETS = {
+  studio: { lighting: { toneMapping: 'neutral', exposure: 1, ambient: 0.9, env: 0.5, key: 2.4, keyColor: '#fff5e6', keyYaw: -40, keyPitch: 50, fill: 0.6, rim: 1, rimColor: '#ffffff' }, shadows: { selfShadows: true, softness: 2 } },
+  future: { lighting: { toneMapping: 'aces', exposure: 1.1, ambient: 0.6, env: 0.9, key: 3.2, keyColor: '#fff1dd', keyYaw: -45, keyPitch: 40, fill: 0.4, rim: 1.4, rimColor: '#ffffff' }, shadows: { selfShadows: true, softness: 0.5 } },
+  shadowmap: { lighting: { toneMapping: 'aces', exposure: 1.05, ambient: 0.75, env: 0.6, key: 2.8, keyColor: '#fff1dd', keyYaw: -45, keyPitch: 45, fill: 0.5, rim: 1.1, rimColor: '#ffffff' }, shadows: { selfShadows: true, softness: 3 } },
+  voxel: { lighting: { toneMapping: 'none', exposure: 1, ambient: 1.3, env: 0.3, key: 1.6, keyColor: '#ffffff', keyYaw: -40, keyPitch: 55, fill: 1, rim: 0.4, rimColor: '#ffffff' }, shadows: { selfShadows: false, softness: 6 } },
+  showcase: { lighting: { toneMapping: 'neutral', exposure: 1.05, ambient: 1, env: 0.6, key: 2, keyColor: '#ffffff', keyYaw: -35, keyPitch: 40, fill: 1.2, rim: 2.2, rimColor: '#ffffff' }, shadows: { selfShadows: true, softness: 6 } },
+  dramatic: { lighting: { toneMapping: 'aces', exposure: 1, ambient: 0.25, env: 0.4, key: 4, keyColor: '#ffe2c2', keyYaw: -70, keyPitch: 25, fill: 0.2, rim: 3, rimColor: '#9ec5ff' }, shadows: { selfShadows: true, softness: 1 } },
+};
+
 export const SCHEMA = [
   { id: 'camera', title: 'Camera', fields: [
     r('yaw', 'Rotation', -180, 180, 1, 30), r('pitch', 'Tilt', -89, 89, 1, 20), r('roll', 'Roll', -180, 180, 1, 0),
@@ -14,6 +25,8 @@ export const SCHEMA = [
     r('padding', 'Padding', 0, 0.45, 0.01, 0.08), b('fitVfx', 'Fit VFX in frame', false),
   ] },
   { id: 'lighting', title: 'Lighting', fields: [
+    s('preset', 'Preset (optional)', ['none', ...Object.keys(LIGHTING_PRESETS)], 'none'),
+    b('robloxSky', 'Roblox sky reflections', false),
     s('toneMapping', 'Tone mapping', ['neutral', 'aces', 'agx', 'none'], 'neutral'), r('exposure', 'Exposure', 0, 3, 0.01, 1),
     r('ambient', 'Ambient', 0, 3, 0.01, 0.7), r('env', 'Reflections', 0, 3, 0.01, 0.45),
     r('key', 'Key light', 0, 10, 0.05, 2.6), c('keyColor', 'Key color', '#ffffff'), r('keyYaw', 'Key direction', -180, 180, 1, -40), r('keyPitch', 'Key height', -10, 90, 1, 45),
@@ -113,6 +126,37 @@ export function withDefaults(saved) {
 
 export const clone = (o) => JSON.parse(JSON.stringify(o));
 
+// Edits from AI agents: merges { section: { key: value }, texts: [layers] } into settings, checking every key, type,
+// range and option against the schema. A lighting preset applies first, so explicit values in the same patch win.
+// Returns notes about anything ignored or clamped.
+export function patchSettings(settings, patch) {
+  const notes = [];
+  for (const [id, vals] of Object.entries(patch ?? {})) {
+    if (id === 'texts') {
+      if (Array.isArray(vals)) settings.texts = vals.map((t) => textLayer(t && typeof t === 'object' ? t : { text: String(t) }));
+      else notes.push('texts must be an array of text layers');
+      continue;
+    }
+    const sec = SCHEMA.find((x) => x.id === id);
+    if (!sec || !vals || typeof vals !== 'object') { notes.push(`unknown section "${id}"`); continue; }
+    if (id === 'lighting' && LIGHTING_PRESETS[vals.preset]) for (const [sid, pv] of Object.entries(LIGHTING_PRESETS[vals.preset])) Object.assign(settings[sid], pv);
+    for (const [k, v] of Object.entries(vals)) {
+      const f = sec.fields.find((x) => x.key === k);
+      if (!f) { notes.push(`unknown setting ${id}.${k}`); continue; }
+      let val;
+      if (f.type === 'range') { val = Number(v); if (Number.isFinite(val)) val = Math.min(f.max, Math.max(f.min, val)); else val = undefined; }
+      else if (f.type === 'bool') val = typeof v === 'boolean' ? v : undefined;
+      else if (f.type === 'color') val = /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : undefined;
+      else if (f.type === 'select') val = f.options.includes(v) ? v : undefined;
+      else if (f.type === 'image') val = typeof v === 'string' && (v === '' || v.startsWith('data:image/')) ? v : undefined;
+      if (val === undefined) { notes.push(`ignored ${id}.${k}: expected ${f.type === 'select' ? f.options.join(' | ') : f.type}`); continue; }
+      if (f.type === 'range' && val !== Number(v)) notes.push(`${id}.${k} clamped to ${val}`);
+      settings[id][k] = val;
+    }
+  }
+  return notes;
+}
+
 export const hexToVec3 = (hex) => {
   const n = parseInt(hex.slice(1), 16);
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
@@ -137,6 +181,8 @@ export const PREFS = [
     { key: 'closeToTray', label: 'Closing the window hides it to the tray', type: 'bool', def: false },
     { key: 'autoUpdate', label: 'Check for updates automatically', type: 'bool', def: true },
   ] },
+  { id: 'studio', title: 'Roblox Studio', icon: 'plugin', hint: 'The plugin adds a "Send to Renderer" button to Studio\'s Plugins tab: each selected model, part or effect arrives here as its own render, and sending it again updates that render.', fields: [] },
+  { id: 'agents', title: 'AI agents', icon: 'robot', hint: 'Connect an AI agent (Claude Code, Codex, Claude Desktop or any MCP client) and it can import models from Studio or Roblox, style them, look at previews and export icons, images and animations, all through this app. The app starts on its own when an agent needs it.', fields: [] },
   { id: 'access', title: 'Roblox access', icon: 'key', hint: 'An API key or cookie lets the app download meshes and textures referenced by your files.', fields: [] },
 ];
 export const prefsWithDefaults = (saved) => ({ ...Object.fromEntries(PREFS.flatMap((s) => s.fields).map((f) => [f.key, f.def])), ...saved });

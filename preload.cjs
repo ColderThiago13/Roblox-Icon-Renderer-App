@@ -26,4 +26,20 @@ contextBridge.exposeInMainWorld('native', {
   getPrefs: () => ipcRenderer.invoke('prefs:get'),
   setPrefs: (p) => ipcRenderer.invoke('prefs:set', p),
   setZoom: (f) => webFrame.setZoomFactor(f),
+  assetName: (id) => ipcRenderer.invoke('asset:name', id),
+  pluginStatus: () => ipcRenderer.invoke('plugin:status'),
+  installPlugin: () => ipcRenderer.invoke('plugin:install'),
+  openPluginFolder: () => ipcRenderer.invoke('plugin:open'),
+  onStudioItems: (cb) => ipcRenderer.on('studio:items', (_e, items) => cb(items)),
+  // AI agents: main asks, the page answers through the handler (see src/ui/agent.js).
+  onAgentCall: (handler) => {
+    ipcRenderer.on('agent:call', async (_e, { id, method, params }) => {
+      try { ipcRenderer.send('agent:reply', id, true, await handler(method, params)); }
+      catch (e) { ipcRenderer.send('agent:reply', id, false, e?.message ?? String(e)); }
+    });
+    ipcRenderer.send('agent:ready');
+  },
+  readLocal: (filePath, kind) => ipcRenderer.invoke('file:readLocal', filePath, kind),
+  agentSetup: (client) => ipcRenderer.invoke('agent:setup', client),
+  agentStatus: () => ipcRenderer.invoke('agent:status'),
 });

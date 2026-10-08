@@ -1,15 +1,165 @@
 // Instance tree -> three.js scene graph plus VFX/light/highlight descriptors.
 import * as THREE from 'three';
-import { loadMesh, loadTexture, loadOverlayTexture } from './assets.js';
+import { getAssetBytes, loadMesh, loadTexture, loadOverlayTexture, loadEmissiveTexture } from './assets.js';
 import { walk, nameOf } from '../rbx/instance.js';
 import { brickColor } from '../rbx/brickcolor.js';
 import { collectAppearances, applyAppearance, classicLimbUrl, chamferedLimb } from './appearance.js';
+import { parseModel } from '../rbx/model.js';
+import { decodeCsgMesh } from '../rbx/csg.js';
 
 const PART_CLASSES = new Set(['Part', 'MeshPart', 'WedgePart', 'CornerWedgePart', 'TrussPart', 'SpawnLocation', 'Seat', 'VehicleSeat', 'SkateboardPlatform', 'PartOperation', 'UnionOperation', 'NegateOperation', 'IntersectOperation', 'FlagStand']);
 export const isPart = (inst) => PART_CLASSES.has(inst.className);
 
 const MAT = { NEON: 288, GLASS: 1568, FORCEFIELD: 1584, SMOOTH: 272, PLASTIC: 256, ICE: 1536, GLACIER: 1552, FOIL: 1072 };
 const METALS = new Set([1040, 1056, 1072, 1088]);
+
+// Roblox base material textures, streamed by Roblox as ordinary image assets (create.roblox.com/docs/parts/materials,
+// "Current Base"): Material enum -> [color, normal, metalness, roughness] asset ids, 0 = none. Plastic, SmoothPlastic,
+// Neon and ForceField are built into the Roblox client and Glass is see-through, so those keep the flat look.
+const BASE_MATERIALS = {
+  1376: [9930003046, 9429449876, 0, 9429450346], // Asphalt
+  788: [9920482056, 9438412214, 0, 9438412457], // Basalt
+  848: [9920482813, 9438453152, 0, 9438453413], // Brick
+  2304: [14108651729, 14108654002, 0, 14108654299], // Cardboard
+  2305: [14108662587, 14108663154, 0, 14108663726], // Carpet
+  2306: [17429425079, 17429425915, 17429426100, 17429426861], // CeramicTiles
+  2307: [18147681935, 18147683410, 0, 18147684855], // ClayRoofTiles
+  880: [9919718991, 9438457162, 0, 9438457470], // Cobblestone
+  816: [9920484153, 9466554006, 0, 9466554186], // Concrete
+  1040: [9920589327, 9439548484, 9439548749, 9439556441], // CorrodedMetal
+  804: [9920484943, 9438508790, 0, 9438509046], // CrackedLava
+  1056: [10237720195, 9438583222, 9438583347, 9438583558], // DiamondPlate
+  1312: [9920517696, 9873280412, 0, 9873282563], // Fabric
+  1072: [9466552117, 9424786192, 9424786272, 9424786620], // Foil
+  1552: [9920518732, 9438812958, 0, 9438851286], // Glacier
+  832: [9920550238, 9438882935, 0, 9438883109], // Granite
+  1280: [9920551868, 9438955773, 0, 9438955997], // Grass
+  1360: [9920554482, 9439043558, 0, 9439043765], // Ground
+  1536: [9920555943, 9467301039, 0, 9467301203], // Ice
+  1284: [9920557906, 9439080781, 0, 9439080950], // LeafyGrass
+  2309: [14108670073, 14108670486, 0, 14108670748], // Leather
+  820: [9920561437, 9439415191, 0, 9439415495], // Limestone
+  784: [9439430596, 9439431240, 0, 9439431383], // Marble
+  1088: [9920574687, 9873295432, 9873318201, 9873318890], // Metal
+  1344: [9920578473, 9439509827, 0, 9439510012], // Mud
+  836: [9920579943, 9439519281, 0, 9439519532], // Pavement
+  864: [9920581082, 9439528644, 0, 9439537267], // Pebble
+  2310: [14108671255, 14108671870, 0, 14108672378], // Plaster
+  896: [9920587470, 9439538417, 0, 9439545859], // Rock
+  2308: [119722544879522, 77534750680073, 0, 129397260312247], // RoofShingles
+  2311: [14108673018, 14108674698, 14108674894, 14108675142], // Rubber
+  1392: [9920590225, 9439565809, 0, 9439566688], // Salt
+  1296: [9920591683, 9439577084, 0, 9439577327], // Sand
+  912: [9920596120, 9439596530, 0, 9439596711], // Sandstone
+  800: [9920599782, 9439612514, 0, 9439612733], // Slate
+  1328: [9920620284, 9439632006, 0, 9439632145], // Snow
+  512: [9920625290, 9439641376, 0, 9439648605], // Wood
+  528: [9920626778, 9439650689, 0, 9439658127], // WoodPlanks
+};
+// ponytail: one tile size for every material (Roblox doesn't publish them); tune here if textures look too big/small.
+const STUDS_PER_TILE = 8;
+
+// Main axis (0 x, 1 y, 2 z) of vertex i's normal once the mesh is scaled.
+const mainAxis = (n, i, scale) => {
+  const a = [Math.abs(n.getX(i) / scale.x), Math.abs(n.getY(i) / scale.y), Math.abs(n.getZ(i) / scale.z)];
+  return a[0] >= a[1] && a[0] >= a[2] ? 0 : a[1] >= a[2] ? 1 : 2;
+};
+
+// Base materials and surface studs tile in studs over every face whatever the mesh UVs: box-project each vertex
+// along its normal's main axis. corner: count from the face's corner (unit shapes), so studs line up with the edges.
+export function studUvGeometry(geo, scale, studsPerTile = STUDS_PER_TILE, corner = false) {
+  const g = geo.clone(), p = g.attributes.position, n = g.attributes.normal, uv = new Float32Array(p.count * 2), o = corner ? 0.5 : 0;
+  for (let i = 0; i < p.count; i++) {
+    const x = (p.getX(i) + o) * scale.x, y = (p.getY(i) + o) * scale.y, z = (p.getZ(i) + o) * scale.z;
+    const [u, v] = [[z, y], [x, z], [x, y]][mainAxis(n, i, scale)];
+    uv[i * 2] = u / studsPerTile; uv[i * 2 + 1] = v / studsPerTile;
+  }
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  return g;
+}
+
+// urls: [color, normal, metalness, roughness] (asset ids or content URLs, falsy = none).
+async function applyBaseMaterial(mesh, urls, warn, studsPerTile = STUDS_PER_TILE) {
+  const material = mesh.material;
+  const load = async (id, srgb) => {
+    if (!id) return null;
+    const tex = await loadTexture(String(id), srgb);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    return tex;
+  };
+  try {
+    const [map, normalMap, metalnessMap, roughnessMap] = await Promise.all(urls.map((id, i) => load(id, i === 0)));
+    mesh.geometry = studUvGeometry(mesh.geometry, mesh.scale, studsPerTile);
+    Object.assign(material, { map, normalMap, roughnessMap, roughness: 1 }); // map is tinted by the part Color, as in Roblox
+    if (metalnessMap) material.metalnessMap = metalnessMap; // scales makeMaterial's metalness: full metal reads near-black under the studio env
+    material.needsUpdate = true;
+  } catch (e) { warn(`Material texture: ${e.message}`); }
+}
+
+// Legacy surface types, drawn from Roblox's studs atlas (rbxasset://textures/studs.dds: 16 stacked tiles of 2×2
+// studs). SurfaceType Glue 1, Weld 2, Studs 3, Inlet 4, Universal 5 -> atlas tile.
+const STUD_TILE = { 1: 4, 2: 4, 3: 0, 4: 8, 5: 12 };
+const FACE_SURFACES = [['rightsurface', 'leftsurface'], ['topsurface', 'bottomsurface'], ['backsurface', 'frontsurface']]; // [+axis, -axis]
+
+export function studTiles(geo, scale, props) {
+  const tiles = FACE_SURFACES.map((pair) => pair.map((k) => STUD_TILE[props[k]] ?? -1));
+  if (tiles.flat().every((t) => t < 0)) return null;
+  const g = studUvGeometry(geo, scale, 2, true), n = g.attributes.normal, tile = new Float32Array(n.count);
+  for (let i = 0; i < n.count; i++) { const axis = mainAxis(n, i, scale); tile[i] = tiles[axis][n.getComponent(i, axis) >= 0 ? 0 : 1]; }
+  g.setAttribute('studTile', new THREE.BufferAttribute(tile, 1));
+  return g;
+}
+
+// The atlas is a detail map around mid-gray (0.5 = unchanged), multiplied into the part color.
+async function applyStuds(mesh, props) {
+  const g = studTiles(mesh.geometry, mesh.scale, props);
+  if (!g) return;
+  let atlas;
+  try { atlas = await loadTexture('rbxasset://textures/studs.dds', false); } catch { return; } // needs a local Roblox install
+  atlas.flipY = false;
+  mesh.geometry = g;
+  const m = mesh.material;
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.studMap = { value: atlas };
+    sh.vertexShader = 'attribute float studTile;\nvarying float vStudTile;\nvarying vec2 vStudUv;\n'
+      + sh.vertexShader.replace('#include <uv_vertex>', '#include <uv_vertex>\nvStudTile = studTile; vStudUv = uv;');
+    sh.fragmentShader = 'uniform sampler2D studMap;\nvarying float vStudTile;\nvarying vec2 vStudUv;\n'
+      + sh.fragmentShader.replace('#include <map_fragment>', `#include <map_fragment>
+  if (vStudTile >= 0.0) { // textureGrad: fract() would break mip selection at tile seams
+    vec2 k = vec2(1.0, 1.0 / 16.0);
+    diffuseColor.rgb *= 2.0 * textureGrad(studMap, vec2(fract(vStudUv.x), (vStudTile + fract(vStudUv.y)) / 16.0), dFdx(vStudUv) * k, dFdy(vStudUv) * k).rgb;
+  }`);
+  };
+  m.customProgramCacheKey = () => 'studs';
+  m.needsUpdate = true;
+}
+
+// Union shape: Roblox's baked mesh, inline or in the PartOperationAsset its AssetId names (shared per asset).
+const unionCache = new Map();
+const blobOf = (p) => [p?.meshdata2, p?.meshdata].find((b) => b instanceof Uint8Array && b.length);
+function unionGeometry(inst) {
+  const inline = blobOf(inst.props), key = inline ? null : inst.props.assetid;
+  if (!inline && !key) return Promise.reject(new Error('no baked shape saved'));
+  if (key && unionCache.has(key)) return unionCache.get(key);
+  const p = (async () => {
+    const blob = inline ?? blobOf(parseModel(await getAssetBytes(key)).roots[0]?.props);
+    if (!blob) throw new Error('no baked shape saved');
+    const m = decodeCsgMesh(blob), col = new THREE.Color(), rgb = new Float32Array((m.colors.length / 4) * 3);
+    for (let i = 0; i < rgb.length / 3; i++) {
+      col.setRGB(m.colors[i * 4] / 255, m.colors[i * 4 + 1] / 255, m.colors[i * 4 + 2] / 255, THREE.SRGBColorSpace);
+      rgb.set([col.r, col.g, col.b], i * 3);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(m.normals, 3));
+    g.setAttribute('color', new THREE.BufferAttribute(rgb, 3));
+    g.setIndex(new THREE.BufferAttribute(m.indices, 1));
+    g.computeBoundingBox();
+    return g;
+  })();
+  if (key) { unionCache.set(key, p); p.catch(() => unionCache.delete(key)); }
+  return p;
+}
 
 export function cframeMatrix(cf) {
   const m = new THREE.Matrix4();
@@ -121,26 +271,50 @@ export function makeMaterial(inst, color) {
   return m;
 }
 
+// Newer SurfaceAppearances keep maps in *Content properties, or only in TexturePack (an XML list of image ids).
+export async function surfaceMaps(p, warn) {
+  const maps = {
+    color: p.colormapcontent || p.colormap, normal: p.normalmapcontent || p.normalmap,
+    roughness: p.roughnessmapcontent || p.roughnessmap, metalness: p.metalnessmapcontent || p.metalnessmap,
+    emissive: p.emissivemaskcontent,
+  };
+  if (p.texturepack) {
+    try {
+      const xml = new TextDecoder().decode(await getAssetBytes(p.texturepack));
+      for (const [, k, id] of xml.matchAll(/<(color|normal|roughness|metalness|emissive)>\s*(\d+)\s*</g)) maps[k] ||= id;
+    } catch (e) { warn(`TexturePack: ${e.message}`); }
+  }
+  return maps;
+}
+
 async function applySurfaceAppearance(material, sa, partCol, warn) {
   const p = sa.props;
+  const maps = await surfaceMaps(p, warn);
   const tint = color3(p.color, 0xffffff);
   const load = async (url, srgb, slot) => {
     if (!url) return;
     try { material[slot] = await loadTexture(url, srgb); } catch (e) { warn(e.message); }
   };
-  if (p.colormap) {
+  if (maps.color) {
     try {
       const overlay = (p.alphamode ?? 0) === 0;
-      material.map = overlay ? await loadOverlayTexture(p.colormap, partCol) : await loadTexture(p.colormap);
+      material.map = overlay ? await loadOverlayTexture(maps.color, partCol) : await loadTexture(maps.color);
       if (!overlay) { material.transparent = true; material.alphaTest = 0.02; }
       material.color.copy(tint);
     } catch (e) { warn(e.message); }
   }
   await Promise.all([
-    load(p.normalmap, false, 'normalMap'),
-    load(p.roughnessmap, false, 'roughnessMap'),
-    load(p.metalnessmap, false, 'metalnessMap'),
+    load(maps.normal, false, 'normalMap'),
+    load(maps.roughness, false, 'roughnessMap'),
+    load(maps.metalness, false, 'metalnessMap'),
   ]);
+  if (maps.emissive && (p.emissivestrength ?? 1) > 0) {
+    try {
+      material.emissiveMap = await loadEmissiveTexture(maps.emissive, maps.color);
+      material.emissive.copy(color3(p.emissivetint, 0xffffff));
+      material.userData.emissiveStrength = p.emissivestrength ?? 1; // intensity set per render with the neon setting
+    } catch (e) { warn(e.message); }
+  }
   if (material.roughnessMap) material.roughness = 1;
   if (material.metalnessMap) material.metalness = 1;
   material.needsUpdate = true;
@@ -296,8 +470,19 @@ async function buildPart(inst, ctx) {
       try { material.map = await loadTexture(p.textureid); material.color.copy(color3(vc, 0xffffff)); material.needsUpdate = true; }
       catch (e) { ctx.warn(`${group.name}: ${e.message}`); }
     }
+  } else if (inst.className.endsWith('Operation')) {
+    try {
+      const geo = await unionGeometry(inst), init = v3(inst.props.initialsize, 0);
+      const ref = init.x > 0 && init.y > 0 && init.z > 0 ? init : geo.boundingBox.getSize(new THREE.Vector3());
+      mesh = new THREE.Mesh(geo, material);
+      mesh.scale.copy(size).divide(ref);
+      // UsePartColor off: each piece keeps the color it was unioned with.
+      if (!inst.props.usepartcolor) { material.vertexColors = true; material.color.set(0xffffff); }
+    } catch (e) {
+      ctx.warn(`${group.name}: union shape unavailable (${e.message}); drawn as its bounding box`);
+      mesh = new THREE.Mesh(unitBox, material); mesh.scale.copy(size);
+    }
   } else {
-    if (inst.className.endsWith('Operation')) ctx.warn(`${group.name}: unions (CSG) render as their bounding box`);
     const [geo, s] = shapeGeometry(inst, size);
     mesh = new THREE.Mesh(geo, material);
     mesh.scale.copy(s);
@@ -325,6 +510,17 @@ async function buildPart(inst, ctx) {
     const plane = await buildDecal(dec, size, ctx.warn, mesh);
     if (plane) group.add(plane);
   }
+  // After the decals: they project onto the shared unit box, which these swap for a tiled-UV copy.
+  if (!material.map && !sa && !special && !appearance) {
+    // A MaterialVariant saved in the file wins; otherwise (or when it's missing, as in Roblox) the base material.
+    const vName = inst.props.materialvariantserialized || inst.props.materialvariant, variant = vName && ctx.variants.get(vName);
+    const baseIds = BASE_MATERIALS[inst.props.material];
+    if (variant && (variant.props.basematerial ?? inst.props.material) === inst.props.material) {
+      const m = await surfaceMaps(variant.props, ctx.warn);
+      if (m.color || m.normal) await applyBaseMaterial(mesh, [m.color, m.normal, m.metalness, m.roughness], ctx.warn, variant.props.studspertile || 10);
+    } else if (baseIds) await applyBaseMaterial(mesh, baseIds, ctx.warn);
+    else if (mesh.geometry === unitBox || mesh.geometry === unitWedge || mesh.geometry === unitCornerWedge) await applyStuds(mesh, inst.props);
+  }
   ctx.partObjects.set(inst, group);
   return group;
 }
@@ -332,7 +528,8 @@ async function buildPart(inst, ctx) {
 // ---------- entry ----------
 export async function buildScene(tree, warn) {
   const root = new THREE.Group();
-  const ctx = { warn, partObjects: new Map(), skinned: [], appearances: collectAppearances(tree) };
+  const variants = new Map([...walk(tree.roots)].filter((i) => i.className === 'MaterialVariant').map((i) => [nameOf(i), i]));
+  const ctx = { warn, partObjects: new Map(), skinned: [], appearances: collectAppearances(tree), variants };
   const vfx = [], trails = [], lights = [], highlights = [];
   const jobs = [];
 

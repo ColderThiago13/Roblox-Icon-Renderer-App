@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { parseMesh, lod0 } from '../rbx/mesh.js';
 import { assetId } from '../rbx/instance.js';
+import { decodeDds } from '../rbx/dds.js';
 
 const bytesCache = new Map();
 const imageCache = new Map();
@@ -33,10 +34,19 @@ export function getAssetBytes(url) {
 
 export function clearMemoryCache() { bytesCache.clear(); imageCache.clear(); meshCache.clear(); }
 
-// -> HTMLImageElement (decoded) or rejects
+// DDS pixels on a canvas that answers naturalWidth/Height like a decoded <img>.
+export function ddsCanvas(bytes) {
+  const { width, height, data } = decodeDds(bytes);
+  const c = Object.assign(document.createElement('canvas'), { width, height });
+  c.getContext('2d').putImageData(new ImageData(data, width, height), 0, 0);
+  return Object.assign(c, { naturalWidth: width, naturalHeight: height });
+}
+
+// -> HTMLImageElement (decoded), or a canvas for DDS files; rejects when undecodable
 export function loadImage(url) {
   if (!imageCache.has(url)) {
     const pending = getAssetBytes(url).then(async (bytes) => {
+      if (bytes[0] === 0x44 && bytes[1] === 0x44 && bytes[2] === 0x53 && bytes[3] === 0x20) return ddsCanvas(bytes);
       const img = new Image();
       img.src = URL.createObjectURL(new Blob([bytes]));
       try { await img.decode(); } finally { URL.revokeObjectURL(img.src); }
@@ -69,6 +79,17 @@ export async function loadOverlayTexture(url, color) {
   g.fillStyle = '#' + color.getHexString(THREE.SRGBColorSpace);
   g.fillRect(0, 0, c.width, c.height);
   g.drawImage(img, 0, 0);
+  return textureFrom(c);
+}
+
+// SurfaceAppearance emission: the grayscale mask times the ColorMap (tint/strength go on the material).
+export async function loadEmissiveTexture(maskUrl, colorUrl) {
+  const mask = await loadImage(maskUrl);
+  const c = document.createElement('canvas');
+  c.width = mask.naturalWidth; c.height = mask.naturalHeight;
+  const g = c.getContext('2d');
+  g.drawImage(mask, 0, 0);
+  if (colorUrl) { g.globalCompositeOperation = 'multiply'; g.drawImage(await loadImage(colorUrl), 0, 0, c.width, c.height); }
   return textureFrom(c);
 }
 

@@ -1,12 +1,13 @@
-import { IconRenderer } from '../render/renderer.js';
+import { IconRenderer, cropOf } from '../render/renderer.js';
 import { createJob, updateVfx, updateTrails, setPose } from '../scene/job.js';
 import { wheelZoom } from './zoom.js';
 import { loadAnimationId } from '../scene/anim.js';
 import { assetId, nameOf, pathOf, atPath } from '../rbx/instance.js';
-import { clearMemoryCache } from '../scene/assets.js';
-import { SCHEMA, TEXT_FIELDS, textLayer, defaultSettings, withDefaults, clone, hexToVec3, PREFS, prefsWithDefaults } from '../settings.js';
+import { clearMemoryCache, getAssetBytes, loadImage, loadMesh } from '../scene/assets.js';
+import { SCHEMA, TEXT_FIELDS, textLayer, defaultSettings, withDefaults, clone, hexToVec3, PREFS, prefsWithDefaults, LIGHTING_PRESETS } from '../settings.js';
 import { hitText, fontFamilies, loadFamily, overlayPending, overlayReady, fontString } from '../render/overlay.js';
-import { frameTimes, gifDelays, sheetLayout, flatten, opaqueSamples, MAX_GIF_SIZE, MAX_SHEET, frameSizeForSheet } from './animexport.js';
+import { createAgent } from './agent.js';
+import { frameTimes, gifDelays, sheetLayout, flatten, opaqueSamples, MAX_GIF_SIZE, MAX_SHEET, frameSizeForSheet, spinFit } from './animexport.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('view');
@@ -33,13 +34,22 @@ function newFile(props) {
 async function addFiles(list) {
   for (const f of list) {
     if (!/\.(rbxmx?|obj)$/i.test(f.name)) { status(`Skipped ${f.name}: unsupported type`); continue; }
-    const bytes = new Uint8Array(await f.arrayBuffer()), src = crypto.randomUUID().replaceAll('-', '');
-    window.native.putSessionBlob(src, bytes).catch((e) => status(`${f.name} won't reopen next launch: ${e.message}`));
-    const file = newFile({ name: f.name, bytes, src, settings: baseSettings() });
-    renderList();
-    if (!current) select(file);
-    load(file);
+    addBytes(f.name, new Uint8Array(await f.arrayBuffer()));
   }
+}
+
+// A new file from bytes (dropped, downloaded by ID or sent from Studio); its bytes are kept for the next launch.
+function sessionBlob(name, bytes) {
+  const src = crypto.randomUUID().replaceAll('-', '');
+  window.native.putSessionBlob(src, bytes).catch((e) => status(`${name} won't reopen next launch: ${e.message}`));
+  return src;
+}
+function addBytes(name, bytes, extra = {}) {
+  const file = newFile({ name, bytes, src: sessionBlob(name, bytes), settings: baseSettings(), ...extra });
+  renderList();
+  if (!current) select(file);
+  load(file);
+  return file;
 }
 
 async function load(file) {
@@ -214,24 +224,28 @@ addEventListener('pointerdown', (e) => { if (!e.target.closest('#ctxMenu')) clos
 addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
 addEventListener('blur', closeMenu);
 
-function setDisabled(keys, off) {
-  const f = current, set = new Set(f.disabled);
+function setDisabled(keys, off, f = current) {
+  const set = new Set(f.disabled);
   for (const k of keys) off ? set.add(k) : set.delete(k);
   f.disabled = [...set];
+  const what = keys.length > 1 ? `${keys.length} items` : nameOf(atPath(f.job.tree.roots, keyPath(keys[0]))); // before load() clears the job
   renderWorkspace();
   load(f);
-  status(`${off ? 'Disabled' : 'Enabled'} ${keys.length > 1 ? `${keys.length} items` : nameOf(instAt(keys[0]))}`);
+  status(`${off ? 'Disabled' : 'Enabled'} ${what}`);
 }
 
 // A split-out model keeps the disabled state of its own descendants.
-function splitOut(keys) {
-  const src = current;
-  if (!ws.full || !keys.length) return;
-  for (const key of keys) {
-    load(newFile({ name: nameOf(instAt(key)), bytes: src.bytes, src: src.src, path: keyPath(key), disabled: src.disabled.filter((k) => k.startsWith(key + '/')), settings: clone(src.settings), checked: src.checked }));
-  }
+function splitOut(keys, src = current) {
+  const roots = src?.job?.tree?.roots;
+  if (!roots || !keys.length) return [];
+  const made = keys.map((key) => {
+    const f = newFile({ name: nameOf(atPath(roots, keyPath(key))), bytes: src.bytes, src: src.src, path: keyPath(key), disabled: src.disabled.filter((k) => k.startsWith(key + '/')), settings: clone(src.settings), checked: src.checked });
+    load(f);
+    return f;
+  });
   renderList();
   status(`Added ${keys.length} model${keys.length > 1 ? 's' : ''} from ${src.name} as separate icons`);
+  return made;
 }
 
 // ---------------- app settings ----------------
@@ -266,6 +280,40 @@ function buildSettings() {
   }, `pref.${fd.key}`)));
   if (sec.id === 'activity') for (const row of body.querySelectorAll('.field:not([data-key="pref.discordActivity"])')) row.style.opacity = prefs.discordActivity ? '' : '.45';
   if (sec.hint) body.append(Object.assign(document.createElement('p'), { className: 'setHint', textContent: sec.hint }));
+  if (sec.id === 'agents') {
+    const note = Object.assign(document.createElement('p'), { className: 'setHint', textContent: 'Checking…' }), row = Object.assign(document.createElement('div'), { className: 'setActions' });
+    body.append(note, row);
+    window.native.agentStatus().then((st) => {
+      const names = { claude: 'Claude Code', codex: 'Codex', desktop: 'Claude Desktop' };
+      const on = Object.keys(names).filter((k) => st[k]);
+      note.textContent = on.length ? `Connected: ${on.map((k) => names[k]).join(', ')}. Restart an agent (or start a new session) after connecting it.` : 'No agent is connected yet. Restart an agent (or start a new session) after connecting it.';
+      for (const [k, label] of Object.entries(names)) {
+        if (k === 'desktop' && !st.desktopInstalled) continue;
+        const b = Object.assign(document.createElement('button'), { type: 'button', textContent: st[k] ? `Reconnect ${label}` : `Connect ${label}` });
+        b.onclick = async () => {
+          b.disabled = true;
+          try { await window.native.agentSetup(k); status(`${label} connected: restart it or start a new session, then ask it to make icons`); }
+          catch (e) { status(`Could not connect ${label}: ${e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')}`); }
+          buildSettings();
+        };
+        row.append(b);
+      }
+      const copy = Object.assign(document.createElement('button'), { type: 'button', textContent: 'Copy config (other apps)', title: 'MCP server config as JSON, for any app that takes mcpServers' });
+      copy.onclick = async () => { await navigator.clipboard.writeText(JSON.stringify(st.config, null, 2)); status('MCP config copied'); };
+      row.append(copy);
+    });
+  }
+  if (sec.id === 'studio') {
+    const st = pluginState, row = Object.assign(document.createElement('div'), { className: 'setActions' });
+    body.append(Object.assign(document.createElement('p'), { className: 'setHint', textContent:
+      !st ? 'Checking the plugin…' : !st.installed ? 'The plugin is not installed.' : st.current ? `The plugin is installed and up to date (version ${st.version}).` : 'This version of the app comes with an updated plugin.' }));
+    for (const [label, fn] of [[!st?.installed ? 'Install plugin' : st.current ? 'Reinstall plugin' : 'Update plugin', installPlugin], ['Open plugins folder', () => window.native.openPluginFolder()]]) {
+      const b = Object.assign(document.createElement('button'), { type: 'button', textContent: label });
+      b.onclick = fn;
+      row.append(b);
+    }
+    body.append(row);
+  }
   if (sec.id === 'access') {
     const row = Object.assign(document.createElement('div'), { className: 'setActions' });
     for (const [label, fn] of [['Roblox access…', () => $('credsBtn').click()], ['Open asset cache', () => window.native.openCache()],
@@ -290,7 +338,7 @@ $('setReset').onclick = () => {
 // Open files and their edits are saved every few seconds and on close, then reopened on the next launch.
 function sessionJson() {
   return JSON.stringify({ current: files.indexOf(current), linkEdits: $('linkEdits').checked,
-    files: files.map((f) => ({ name: f.name, src: f.src, path: f.path, disabled: f.disabled, settings: f.settings, animSel: f.animSel, animTime: f.animTime, checked: f.checked })) });
+    files: files.map((f) => ({ name: f.name, src: f.src, path: f.path, disabled: f.disabled, settings: f.settings, animSel: f.animSel, animTime: f.animTime, checked: f.checked, studioKey: f.studioKey })) });
 }
 let savedSession = null; // null until the previous session is restored, so an early save can't wipe it
 function saveSession() {
@@ -334,7 +382,28 @@ function prepare(file) {
 }
 function draw(file, size, opts) {
   prepare(file);
+  if (file.settings.lighting.robloxSky) ensureSky();
   return renderer.render(file.job, file.settings, size, opts);
+}
+
+// Roblox's default sky from the local install, decoded once when a file first asks for it.
+let skyLoading = null;
+function ensureSky() {
+  skyLoading ??= Promise.all(['rt', 'lf', 'up', 'dn', 'ft', 'bk'].map((n) => loadImage(`rbxasset://textures/sky/sky512_${n}.tex`))).then((faces) => {
+    renderer.setSky(faces);
+    requestPreview();
+    for (const f of files) if (f.settings.lighting.robloxSky) thumb(f);
+  }, (e) => status(`Roblox sky reflections need Roblox Studio or the Roblox player installed (${e.message})`));
+}
+
+// Export shape (width / height) from the toolbar; the preview frames for it and darkens the cropped part.
+const aspectOf = () => +$('expAspect').value || 1;
+function syncAspectMask() {
+  const m = $('aspectMask'), a = aspectOf();
+  m.hidden = a === 1 || !current?.job;
+  if (m.hidden) return;
+  const vr = $('viewport').getBoundingClientRect(), cr = canvas.getBoundingClientRect(), [cw, ch] = cropOf(a);
+  Object.assign(m.style, { left: `${cr.left - vr.left + (cr.width * (1 - cw)) / 2}px`, top: `${cr.top - vr.top + (cr.height * (1 - ch)) / 2}px`, width: `${cr.width * cw}px`, height: `${cr.height * ch}px` });
 }
 
 let previewQueued = false;
@@ -350,9 +419,10 @@ function drawPreview() {
   const px = Math.round(css * devicePixelRatio);
   canvas.style.width = canvas.style.height = css + 'px';
   if (canvas.width !== px) renderer.gl.setSize(px, px, false);
-  if (!current?.job) { renderer.gl.setRenderTarget(null); renderer.gl.clear(); return; }
-  try { draw(current, px); }
+  if (!current?.job) { renderer.gl.setRenderTarget(null); renderer.gl.clear(); syncAspectMask(); return; }
+  try { draw(current, px, { aspect: aspectOf() }); }
   catch (e) { console.error(e); status('Render error: ' + e.message); }
+  syncAspectMask();
   previewLayouts = renderer.layouts ?? [];
   syncTextSel();
   // Fonts / background image still loading: draw again (and refresh the thumbnail) once they are ready.
@@ -417,6 +487,10 @@ function buildPanel() {
       setValue(sec.id, fd.key, v);
       if (sec.id === 'vfx') syncTimeline();
       if (fd.type === 'image') { if (v) setValue('background', 'mode', 'image'); buildPanel(); }
+      if (fd.key === 'preset' && LIGHTING_PRESETS[v]) { // writes the preset's values, which stay editable
+        for (const f of targets()) for (const [id, vals] of Object.entries(LIGHTING_PRESETS[v])) Object.assign(f.settings[id], vals);
+        buildPanel();
+      }
     }, `${sec.id}.${fd.key}`));
     panel.append(det);
   }
@@ -896,11 +970,11 @@ $('animId').onkeydown = (e) => { if (e.key === 'Enter') $('animAdd').click(); };
 
 // ---------------- export ----------------
 const EXT = { png: 'png', webp: 'webp', jpeg: 'jpg' };
-const exportOpts = () => ({ size: +$('expSize').value, format: $('expFormat').value, ss: +$('expSS').value });
-for (const id of ['expSize', 'expFormat', 'expSS']) {
+const exportOpts = () => ({ size: +$('expSize').value, format: $('expFormat').value, ss: +$('expSS').value, aspect: aspectOf() });
+for (const id of ['expSize', 'expFormat', 'expSS', 'expAspect']) {
   const saved = store.get(id, null);
   if (saved != null) $(id).value = saved;
-  $(id).onchange = () => store.set(id, $(id).value);
+  $(id).onchange = () => { store.set(id, $(id).value); if (id === 'expAspect') requestPreview(); };
 }
 
 function canvasOf(w, h, img = null) {
@@ -913,12 +987,13 @@ async function canvasBytes(c, format = 'png') {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
-async function encode(file, { size, format, ss }) {
+async function encode(file, { size, format, ss, aspect = 1 }) {
   await overlayReady(file.settings);
-  let c = canvasOf(size, size, draw(file, size, { out: 'pixels', supersample: ss }));
+  const img = draw(file, size, { out: 'pixels', supersample: ss, aspect });
+  let c = canvasOf(img.width, img.height, img);
   if (format === 'jpeg') {
-    const flat = canvasOf(size, size), g = flat.getContext('2d');
-    g.fillStyle = '#ffffff'; g.fillRect(0, 0, size, size); g.drawImage(c, 0, 0);
+    const flat = canvasOf(img.width, img.height), g = flat.getContext('2d');
+    g.fillStyle = '#ffffff'; g.fillRect(0, 0, img.width, img.height); g.drawImage(c, 0, 0);
     c = flat;
   }
   requestPreview();
@@ -978,7 +1053,7 @@ function syncAnimDlg() {
 }
 for (const id of ['axStart', 'axDuration']) $(id).oninput = syncAnimDlg;
 if (store.get('ax:axSize', null) == null) $('axSize').value = $('expSize').value;
-for (const id of ['axScope', 'axFormat', 'axSizeBy', 'axSheetSize', 'axSize', 'axSource', 'axFps', 'axLoop', 'axLock', 'axCols', 'axPad', 'axGifBg', 'axGifColor']) {
+for (const id of ['axScope', 'axFormat', 'axSizeBy', 'axSheetSize', 'axSize', 'axSource', 'axFps', 'axLoop', 'axLock', 'axTurn', 'axCols', 'axPad', 'axGifBg', 'axGifColor']) {
   const el = $(id), prop = el.type === 'checkbox' ? 'checked' : 'value', saved = store.get('ax:' + id, null);
   if (saved != null) el[prop] = saved;
   el.onchange = () => { store.set('ax:' + id, el[prop]); syncAnimDlg(); };
@@ -1005,8 +1080,8 @@ async function exportAnimation() {
   if (!folder) return;
   const o = { ...exportOpts(), size: +$('axSize').value, format: $('axFormat').value, source: $('axSource').value,
     fps: clamp(Math.round(+$('axFps').value || 24), 1, 60), start: Math.max(0, +$('axStart').value || 0), duration: Math.max(0.01, +$('axDuration').value || 1),
-    loop: $('axLoop').checked, lock: $('axLock').checked, cols: Math.max(0, Math.round(+$('axCols').value || 0)), pad: Math.max(0, Math.round(+$('axPad').value || 0)),
-    gifBg: $('axGifBg').value === 'solid' ? hexToVec3($('axGifColor').value).map((v) => v * 255) : null };
+    loop: $('axLoop').checked, lock: $('axLock').checked, turntable: $('axTurn').checked, cols: Math.max(0, Math.round(+$('axCols').value || 0)), pad: Math.max(0, Math.round(+$('axPad').value || 0)),
+    gifBg: $('axGifBg').value === 'solid' ? hexToVec3($('axGifColor').value).map((v) => v * 255) : null, bgColor: hexToVec3($('axGifColor').value).map((v) => v * 255) };
   if (o.format === 'gif') o.size = Math.min(o.size, MAX_GIF_SIZE);
   if (o.format === 'sheet') ({ size: o.size, sheet: o.sheet } = sheetPlan()); // same frame count for every file
   setPlaying(false); setAnimPlaying(false);
@@ -1052,12 +1127,23 @@ function gifWorker() {
 // One file's clip. Frames stream to disk (or into the sheet / GIF encoder) instead of piling up in memory.
 // Returns a note for the status line, if any.
 async function exportClip(f, o, folder, name, progress) {
+  const yaw = f.settings.camera.yaw;
+  try { return await exportClipFrames(f, o, folder, name, progress); } finally { f.settings.camera.yaw = yaw; }
+}
+
+async function exportClipFrames(f, o, folder, name, progress) {
   await overlayReady(f.settings);
-  const times = frameTimes(o.start, o.duration, o.fps, o.loop);
-  const at = (t) => { if (o.source !== 'vfx') f.animTime = t; if (o.source !== 'animation') f.settings.vfx.time = t; };
+  const times = frameTimes(o.start, o.duration, o.fps, o.loop), yaw0 = f.settings.camera.yaw;
+  const aspect = o.format === 'sheet' ? 1 : o.aspect ?? 1;
+  const at = (t) => {
+    if (o.source !== 'vfx') f.animTime = t;
+    if (o.source !== 'animation') f.settings.vfx.time = t;
+    if (o.turntable) f.settings.camera.yaw = yaw0 + (360 * (t - o.start)) / o.duration;
+  };
   // Lock framing across the clip, so per-frame auto-fit doesn't make the model grow and shrink.
-  const fit = o.lock ? renderer.clipFit(f.job, f.settings, times, (t) => { at(t); prepare(f); }) : null;
-  const frame = (t, size = o.size, ss = o.ss) => { at(t); return draw(f, size, { out: 'pixels', supersample: ss, fit }); };
+  let fit = o.lock ? renderer.clipFit(f.job, f.settings, times, (t) => { at(t); prepare(f); }, aspect) : null;
+  if (fit && o.turntable) fit = spinFit(fit);
+  const frame = (t, size = o.size, ss = o.ss) => { at(t); return draw(f, size, { out: 'pixels', supersample: ss, fit, aspect }); };
   const write = async (file, bytes) => window.native.writeFile(await window.native.joinPath(folder, file), bytes);
   let format = o.format, note = null;
   const layout = format === 'sheet' ? sheetLayout(times.length, o.size, o.cols, o.pad) : null;
@@ -1069,7 +1155,8 @@ async function exportClip(f, o, folder, name, progress) {
     for (const [i, t] of times.entries()) {
       if (axState?.cancelled) return note;
       progress(i, times.length, 'Frame');
-      await write(`${name}_${String(i).padStart(digits, '0')}.png`, await canvasBytes(canvasOf(o.size, o.size, frame(t))));
+      const img = frame(t);
+      await write(`${name}_${String(i).padStart(digits, '0')}.png`, await canvasBytes(canvasOf(img.width, img.height, img)));
       await yieldUI();
     }
     return note;
@@ -1091,6 +1178,8 @@ async function exportClip(f, o, folder, name, progress) {
     return note;
   }
 
+  if (format === 'mp4' || format === 'webm') return exportVideo(o, format, times, frame, write, name, progress, aspect);
+
   // GIF: one palette from a few evenly spaced frames, then frames encode in a worker while the next one renders.
   const gif = gifWorker();
   try {
@@ -1103,7 +1192,8 @@ async function exportClip(f, o, folder, name, progress) {
       opaqueSamples(img.data, 20000, samples);
       await yieldUI();
     }
-    await gif.call({ type: 'start', samples: new Uint8Array(samples), width: o.size, height: o.size, transparent: !o.gifBg, repeat: o.loop ? 0 : -1 });
+    const [cw, ch] = cropOf(aspect);
+    await gif.call({ type: 'start', samples: new Uint8Array(samples), width: Math.round(o.size * cw), height: Math.round(o.size * ch), transparent: !o.gifBg, repeat: o.loop ? 0 : -1 });
     const delays = gifDelays(times.length, o.fps);
     let pending = null;
     for (const [i, t] of times.entries()) {
@@ -1121,6 +1211,125 @@ async function exportClip(f, o, folder, name, progress) {
   } finally { gif.terminate(); }
   return note;
 }
+
+// Video: frames go to a canvas that WebCodecs encodes (H.264 in MP4, or VP9 in WebM, which can keep transparency),
+// muxed by mediabunny at exact frame timestamps. MP4, and WebM on a solid background, are flattened on the color.
+async function exportVideo(o, format, times, frame, write, name, progress, aspect) {
+  const { Output, Mp4OutputFormat, WebMOutputFormat, BufferTarget, CanvasSource, QUALITY_HIGH, canEncodeVideo } = await import('mediabunny');
+  const [cw, ch] = cropOf(aspect), even = (v) => Math.max(2, Math.round(v) & ~1); // encoders need even sizes
+  const W = even(o.size * cw), H = even(o.size * ch), codec = format === 'mp4' ? 'avc' : 'vp9';
+  const alpha = format === 'webm' && !o.gifBg, bg = format === 'mp4' ? o.bgColor : o.gifBg;
+  if (!(await canEncodeVideo(codec, { width: W, height: H, bitrate: QUALITY_HIGH })))
+    throw new Error(`this computer can't encode ${codec === 'avc' ? 'H.264' : 'VP9'} at ${W}×${H}; try a smaller size or the other video format`);
+  const canvas = canvasOf(W, H), g = canvas.getContext('2d');
+  const output = new Output({ format: format === 'mp4' ? new Mp4OutputFormat({ fastStart: 'in-memory' }) : new WebMOutputFormat(), target: new BufferTarget() });
+  const source = new CanvasSource(canvas, { codec, bitrate: QUALITY_HIGH, alpha: alpha ? 'keep' : 'discard', keyFrameInterval: 2 });
+  output.addVideoTrack(source, { frameRate: o.fps });
+  await output.start();
+  for (const [i, t] of times.entries()) {
+    if (axState?.cancelled) { await output.cancel(); return null; }
+    progress(i, times.length, 'Frame');
+    const img = frame(t);
+    if (bg) flatten(img.data, bg);
+    g.clearRect(0, 0, W, H);
+    g.putImageData(img, 0, 0);
+    await source.add(i / o.fps, 1 / o.fps);
+    await yieldUI();
+  }
+  progress(times.length, times.length, 'Encoding');
+  await output.finalize();
+  await write(`${name}.${format}`, new Uint8Array(output.target.buffer));
+  return null;
+}
+
+// ---------------- camera views ----------------
+// Preset angles for the current (or linked) files; zoom and offsets stay. Yaw 0 looks at the model's front (-Z).
+const VIEWS = [['Front', 0, 0, 0], ['3/4', 35, 20, 0], ['Side', 90, 0, 0], ['Back', 180, 0, 0], ['Top', 0, 89, 0], ['Tilt', 30, 18, -14]];
+$('viewBtn').onclick = (e) => {
+  e.stopPropagation();
+  const menu = $('ctxMenu');
+  menu.replaceChildren(Object.assign(document.createElement('div'), { className: 'menuHead', textContent: 'Camera angle' }), ...VIEWS.map(([label, yaw, pitch, roll]) => {
+    const b = Object.assign(document.createElement('button'), { textContent: label });
+    b.onclick = () => {
+      closeMenu();
+      if (!current) return;
+      for (const [k, v] of [['yaw', yaw], ['pitch', pitch], ['roll', roll]]) { setValue('camera', k, v); syncField('camera', k); }
+      status(`View: ${label}`);
+    };
+    return b;
+  }));
+  menu.hidden = false;
+  const r = $('viewBtn').getBoundingClientRect(), m = menu.getBoundingClientRect();
+  Object.assign(menu.style, { left: `${Math.min(r.left, innerWidth - m.width - 4)}px`, top: `${r.top - m.height - 4}px` });
+};
+
+// ---------------- add by asset ID ----------------
+$('addIdBtn').onclick = () => { $('idInput').value = ''; $('idDlg').showModal(); };
+$('idOk').onclick = (e) => {
+  e.preventDefault();
+  const ids = [...new Set($('idInput').value.match(/\d{3,}/g) ?? [])];
+  if (!ids.length) return status('Enter at least one asset ID or link');
+  $('idDlg').close();
+  addAssetIds(ids);
+};
+async function addAssetIds(ids) {
+  const added = [];
+  for (const id of ids) {
+    status(`Downloading asset ${id}…`);
+    try {
+      const [bytes, name] = await Promise.all([getAssetBytes(id), window.native.assetName(id)]);
+      const label = (name || `Asset ${id}`).replace(/[\\/:*?"<>|]/g, '_'), head = new TextDecoder('latin1').decode(bytes.subarray(0, 12));
+      if (head.startsWith('<roblox')) added.push(addBytes(`${label}.rbxm`, bytes));
+      else if (head.startsWith('version ')) added.push(addBytes(`${label}.rbxmx`, await meshModel(id, label)));
+      else throw new Error("not a model or mesh (images, audio and packages can't be rendered)");
+      status(`Added ${label}`);
+    } catch (e) { status(`Asset ${id}: ${e.message}`); added.push({ id, error: e.message }); }
+  }
+  return added;
+}
+// A bare mesh asset becomes one MeshPart sized to the mesh.
+async function meshModel(id, name) {
+  const geo = await loadMesh(id);
+  geo.computeBoundingBox();
+  const { min, max } = geo.boundingBox, [x, y, z] = ['x', 'y', 'z'].map((k) => max[k] - min[k] || 1);
+  return new TextEncoder().encode(`<roblox version="4"><Item class="MeshPart" referent="RBX0"><Properties><string name="Name">${esc(name)}</string>`
+    + `<Content name="MeshId"><url>rbxassetid://${id}</url></Content><Vector3 name="size"><X>${x}</X><Y>${y}</Y><Z>${z}</Z></Vector3></Properties></Item></roblox>`);
+}
+
+// ---------------- Roblox Studio plugin ----------------
+// Selections sent from Studio: one file each. Sending the same instance again replaces that file's model and keeps
+// its settings, so re-sending after an edit re-renders it.
+function receiveStudio(items) {
+  return items.map((it) => {
+    const bytes = new Uint8Array(it.bytes), old = it.key && files.find((f) => f.studioKey === it.key);
+    if (!old) return addBytes(`${it.name}.rbxm`, bytes, { studioKey: it.key });
+    Object.assign(old, { name: `${it.name}.rbxm`, bytes, src: sessionBlob(it.name, bytes), path: null, disabled: [] });
+    load(old);
+    return old;
+  });
+}
+window.native.onStudioItems((items) => {
+  const got = receiveStudio(items);
+  if (got.length) select(got.at(-1));
+  status(`Received ${items.length} item${items.length === 1 ? '' : 's'} from Roblox Studio`);
+});
+let pluginState = null;
+async function refreshPlugin() {
+  pluginState = await window.native.pluginStatus().catch(() => null);
+  $('pluginBtn').hidden = !pluginState || pluginState.current;
+  $('pluginBtn').querySelector('span').textContent = pluginState?.installed ? 'Update plugin' : 'Install plugin';
+  if (settingsTab === 'studio' && $('settingsDlg').open) buildSettings();
+}
+async function installPlugin() {
+  try {
+    const was = pluginState?.installed;
+    await window.native.installPlugin();
+    status(`Studio plugin ${was ? 'updated' : 'installed'}: "Send to Renderer" is in Studio's Plugins tab (restart Studio if it's open and the button doesn't appear)`);
+  } catch (e) { status(`Could not install the Studio plugin: ${e.message}`); }
+  refreshPlugin();
+}
+$('pluginBtn').onclick = installPlugin;
+refreshPlugin();
 
 // ---------------- toolbar ----------------
 $('addBtn').onclick = () => $('fileInput').click();
@@ -1264,5 +1473,19 @@ renderWorkspace();
   prefsLoaded.then(() => (prefs.splash ? schedule() : hide()));
 }
 
+// AI agents (MCP): main forwards each tool call here; handlers live in agent.js.
+const agent = createAgent({
+  files, current: () => current, aspect: aspectOf, addBytes, receiveStudio, addAssetIds, removeFile, select, splitOut, setDisabled, load,
+  thumb, buildPanel, renderList, requestPreview, syncAnimBar, encode, exportClip, ensureTrack, imageDataUrl,
+  profiles: () => profiles,
+  saveProfile: async (name, settings) => { profiles[name] = settings; await window.native.setProfiles(profiles); renderProfiles(); },
+});
+window.native.onAgentCall(async (method, params) => {
+  if (!Object.hasOwn(agent, method)) throw new Error(`Unknown agent call ${method}`);
+  const result = await agent[method](params ?? {});
+  status(`AI agent: ${method.replace(/[A-Z]/g, (c) => ' ' + c.toLowerCase())}`);
+  return result;
+});
+
 // Test hook: lets an automated harness load files and grab renders.
-window.__app = { addFiles, files, renderer, encode, select, loadAnimationId, exportClip, sessionRestored, saveSession, splitOut, sheetPlan };
+window.__app = { addFiles, addAssetIds, files, renderer, encode, select, loadAnimationId, exportClip, sessionRestored, saveSession, splitOut, sheetPlan };

@@ -2,14 +2,15 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { makeInstance, finalizeTree, pathOf, renderTree } from '../src/rbx/instance.js';
 import { brickColor } from '../src/rbx/brickcolor.js';
-import { defaultSettings, withDefaults, textLayer } from '../src/settings.js';
+import { defaultSettings, withDefaults, textLayer, patchSettings } from '../src/settings.js';
 import { layoutText, frameLayout, hitText } from '../src/render/overlay.js';
 import { wheelZoom } from '../src/ui/zoom.js';
 import { collectAppearances, clothingGeometry, clothingRect, chamferedLimb } from '../src/scene/appearance.js';
-import { buildScene, projectedDecalGeometry } from '../src/scene/build.js';
+import { buildScene, projectedDecalGeometry, surfaceMaps, studUvGeometry, studTiles } from '../src/scene/build.js';
 import { buildRig } from '../src/scene/anim.js';
 import { buildTrails, clipTrail, directionalHistory, trailGeometry, behindDirection } from '../src/scene/trails.js';
-import { frameTimes, gifDelays, sheetLayout, flatten, frameSizeForSheet } from '../src/ui/animexport.js';
+import { frameTimes, gifDelays, sheetLayout, flatten, frameSizeForSheet, spinFit } from '../src/ui/animexport.js';
+import { cropOf } from '../src/render/renderer.js';
 import { setPose, updateTrails } from '../src/scene/job.js';
 
 const settings = defaultSettings();
@@ -224,5 +225,54 @@ assert.equal(hitText([L], 0.6 + 0.03, 0.3), null);
   assert.equal(frameSizeForSheet(12, 4096), 1024); // 4 x 3 grid, limited by width
   assert.equal(frameSizeForSheet(12, 4096, 2, 4), 679); // 2 x 6 grid, limited by height: (4096 - 5 * 4) / 6
   for (const n of [1, 7, 48, 120, 1200]) { const f = frameSizeForSheet(n, 2048, 0, 2), L = sheetLayout(n, f, 0, 2); assert.ok(L.width <= 2048 && L.height <= 2048, `${n} frames fit`); }
+}
+{ // base material UVs tile in studs on each face's own plane, independent of the part's scale
+  const g = studUvGeometry(new THREE.BoxGeometry(1, 1, 1), new THREE.Vector3(16, 4, 8), 8);
+  const p = g.attributes.position, n = g.attributes.normal, uv = g.attributes.uv;
+  for (let i = 0; i < p.count; i++) {
+    const [u, v] = n.getY(i) ? [p.getX(i) * 2, p.getZ(i)] : n.getX(i) ? [p.getZ(i), p.getY(i) / 2] : [p.getX(i) * 2, p.getY(i) / 2];
+    assert.ok(Math.abs(uv.getX(i) - u) < 1e-6 && Math.abs(uv.getY(i) - v) < 1e-6, `vertex ${i} uv`);
+  }
+}
+{ // surface studs: each face picks its own atlas tile, counted from the face corner so studs meet the edges
+  const g = studTiles(new THREE.BoxGeometry(1, 1, 1), new THREE.Vector3(4, 1, 2), { topsurface: 3, bottomsurface: 4, frontsurface: 2 });
+  const n = g.attributes.normal, t = g.attributes.studTile, uv = g.attributes.uv, tileOf = (x, y, z) => [...Array(n.count).keys()].filter((i) => n.getX(i) === x && n.getY(i) === y && n.getZ(i) === z).map((i) => t.getX(i));
+  assert.deepEqual(new Set(tileOf(0, 1, 0)), new Set([0])); // Studs
+  assert.deepEqual(new Set(tileOf(0, -1, 0)), new Set([8])); // Inlet
+  assert.deepEqual(new Set(tileOf(0, 0, -1)), new Set([4])); // Weld on the front (-Z)
+  assert.deepEqual(new Set(tileOf(1, 0, 0)), new Set([-1])); // Smooth
+  const us = [...Array(n.count).keys()].filter((i) => n.getY(i) === 1).map((i) => uv.getX(i));
+  assert.deepEqual([Math.min(...us), Math.max(...us)], [0, 2]); // 4 studs = 2 tiles of 2x2 studs
+  assert.equal(studTiles(new THREE.BoxGeometry(1, 1, 1), new THREE.Vector3(1, 1, 1), {}), null);
+}
+{ // turntable framing turns the points about their vertical center line; crops keep the long side
+  const fit = spinFit({ points: new Float32Array([1, 0, 0, 3, 5, 0]), minY: 0 }, 4);
+  const r = []; for (let i = 0; i < fit.points.length; i += 3) r.push(Math.round(Math.hypot(fit.points[i] - 2, fit.points[i + 2]) * 1e6) / 1e6);
+  assert.deepEqual(new Set(r), new Set([1]));
+  assert.equal(fit.points.length, 2 * 4 * 3);
+  assert.deepEqual(cropOf(16 / 9), [1, 9 / 16]);
+  assert.deepEqual(cropOf(0.5), [0.5, 1]);
+  assert.deepEqual(cropOf(), [1, 1]);
+}
+{ // agent settings patches are checked against the schema; presets apply first so explicit values win
+  const st = defaultSettings();
+  const notes = patchSettings(st, { camera: { yaw: 400, zoom: '1.5', nope: 1 }, outline: { color: 'red', enabled: true }, lighting: { preset: 'dramatic', key: 1 }, texts: [{ text: 'HI', y: 0.4 }], bogus: {} });
+  assert.equal(st.camera.yaw, 180); assert.equal(st.camera.zoom, 1.5);
+  assert.equal(st.outline.color, '#000000'); assert.equal(st.outline.enabled, true);
+  assert.equal(st.lighting.rim, 3); assert.equal(st.lighting.key, 1); assert.equal(st.lighting.preset, 'dramatic');
+  assert.equal(st.texts.length, 1); assert.equal(st.texts[0].text, 'HI'); assert.equal(st.texts[0].size, 64);
+  for (const n of ['camera.yaw clamped to 180', 'unknown setting camera.nope', 'ignored outline.color: expected color', 'unknown section "bogus"']) assert.ok(notes.includes(n), n);
+}
+{ // SurfaceAppearance maps come from *Content props or the TexturePack XML; explicit props win
+  const pack = `<roblox>
+  <texturepack_version>2</texturepack_version>
+  <color>11</color>
+  <metalness>12</metalness>
+  <emissive>13</emissive>
+</roblox>`;
+  globalThis.window = { native: { getAsset: async (id) => (id === '99' ? new TextEncoder().encode(pack) : Promise.reject(new Error('no ' + id))) } };
+  const m = await surfaceMaps({ colormap: 'rbxassetid://5', normalmapcontent: 'rbxassetid://6', texturepack: 'rbxassetid://99' }, assert.fail);
+  assert.deepEqual(m, { color: 'rbxassetid://5', normal: 'rbxassetid://6', roughness: undefined, metalness: '12', emissive: '13' });
+  delete globalThis.window;
 }
 console.log('scene, appearance, classic R6, trails, zoom, head/decal, text layout, animated export ok');
