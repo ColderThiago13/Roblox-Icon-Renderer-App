@@ -1,6 +1,6 @@
 // Instance tree -> three.js scene graph plus VFX/light/highlight descriptors.
 import * as THREE from 'three';
-import { getAssetBytes, loadMesh, loadTexture, loadOverlayTexture, loadEmissiveTexture } from './assets.js';
+import { getAssetBytes, loadMesh, loadTexture, loadOverlayTexture, loadAlphaTexture, loadEmissiveTexture } from './assets.js';
 import { walk, nameOf } from '../rbx/instance.js';
 import { brickColor } from '../rbx/brickcolor.js';
 import { collectAppearances, applyAppearance, classicLimbUrl, chamferedLimb } from './appearance.js';
@@ -298,8 +298,11 @@ async function applySurfaceAppearance(material, sa, partCol, warn) {
   if (maps.color) {
     try {
       const overlay = (p.alphamode ?? 0) === 0;
-      material.map = overlay ? await loadOverlayTexture(maps.color, partCol) : await loadTexture(maps.color);
-      if (!overlay) { material.transparent = true; material.alphaTest = 0.02; }
+      material.map = overlay ? await loadOverlayTexture(maps.color, partCol) : await loadAlphaTexture(maps.color);
+      // Cutouts (leaf/hair cards) stay opaque with depth so overlapping cards sort per pixel; the MSAA scene target turns
+      // alpha into coverage for soft edges. Blending them can't sort cards within one mesh.
+      if (material.map.userData.cutout) { material.alphaTest = 0.5; material.alphaToCoverage = true; }
+      else if (!overlay) { material.transparent = true; material.alphaTest = 0.02; }
       material.color.copy(tint);
     } catch (e) { warn(e.message); }
   }

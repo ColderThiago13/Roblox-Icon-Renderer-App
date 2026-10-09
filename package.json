@@ -1,6 +1,6 @@
 {
   "name": "roblox-icon-renderer",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Desktop icon renderer for Roblox .rbxm/.rbxmx/.obj files with post-processing and VFX",
   "main": "main.js",
   "type": "module",

@@ -1,7 +1,7 @@
 // Keyframe sampling + easing sanity checks. Usage: node test/anim.test.js
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { ease, sampleTrack, trackFromKeyframeSequence } from '../src/scene/anim.js';
+import { buildRig, ease, sampleTrack, trackFromKeyframeSequence } from '../src/scene/anim.js';
 
 const key = (t, x, style = 0, dir = 0) => ({ t, pos: new THREE.Vector3(x, 0, 0), quat: new THREE.Quaternion(), style, dir });
 const track = { name: 't', length: 2, loop: true, curves: new Map([['Arm', [key(0, 0), key(1, 10, 1), key(2, 20)]]]) };
@@ -24,6 +24,19 @@ assert.ok(Math.abs(ease(5, 2, 0.5) - 0.5) < 1e-9);
   assert.equal(tr.curves.get('Torso').length, 2);
   assert.equal(new THREE.Vector3().setFromMatrixPosition(sampleTrack(tr, 'Torso', 0.5)).x, 5);
   assert.equal(tr.curves.get('Arm').length, 1);
+}
+
+// WeldConstraints saved in files name their parts Part0Internal/Part1Internal; welded parts follow the animated joint.
+{
+  const I = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  const part = (name, x) => ({ className: 'Part', props: { name, cframe: { p: [x, 0, 0], r: I } }, children: [] });
+  const torso = part('Torso', 0), arm = part('Arm', 1), sword = part('Sword', 3);
+  const motor = { className: 'Motor6D', props: { part0: torso, part1: arm, c0: { p: [1, 0, 0], r: I }, c1: { p: [0, 0, 0], r: I } }, children: [] };
+  const weld = { className: 'WeldConstraint', props: { part0internal: arm, part1internal: sword }, children: [] };
+  const rig = buildRig({ all: [torso, arm, sword, motor, weld] }, new Map());
+  const tr = { name: 'r', length: 1, loop: true, curves: new Map([['Arm', [key(0, 0), key(1, 0)].map((k) => ({ ...k, pos: new THREE.Vector3(0, 5, 0) }))]]) };
+  rig.apply(tr, 0);
+  assert.deepEqual(new THREE.Vector3().setFromMatrixPosition(sword.anim).toArray(), [3, 5, 0]);
 }
 
 console.log('anim ok');

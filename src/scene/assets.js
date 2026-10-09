@@ -82,6 +82,47 @@ export async function loadOverlayTexture(url, color) {
   return textureFrom(c);
 }
 
+// Color map with a transparent alpha (SurfaceAppearance AlphaMode.Transparency). Mostly hard-edged alpha (foliage, hair
+// cards, grates) -> userData.cutout, with mipmaps whose alpha keeps the same share of pixels >= 0.5: plain mips average
+// a leaf card to a uniform ~0.45, so an alpha-tested canopy would dissolve with distance.
+export async function loadAlphaTexture(url) {
+  const img = await loadImage(url);
+  const w0 = img.naturalWidth, h0 = img.naturalHeight;
+  const g0 = Object.assign(document.createElement('canvas'), { width: w0, height: h0 }).getContext('2d', { willReadFrequently: true });
+  g0.drawImage(img, 0, 0);
+  const base = g0.getImageData(0, 0, w0, h0), a0 = base.data;
+  let visible = 0, soft = 0, solid = 0;
+  for (let i = 3; i < a0.length; i += 4) { const a = a0[i]; if (a > 8) { visible++; if (a < 247) soft++; } if (a >= 128) solid++; }
+  if (!visible || soft / visible > 0.5) return textureFrom(img); // glass-like gradients: blend as before
+  const coverage = solid / (w0 * h0);
+  // Clear texels are often black: filtering would pull leaf edges toward black, so give them the average visible color.
+  const mean = [0, 0, 0];
+  for (let i = 0; i < a0.length; i += 4) if (a0[i + 3] > 8) for (let c = 0; c < 3; c++) mean[c] += a0[i + c] / visible;
+  const fillClear = (d) => { for (let i = 0; i < d.length; i += 4) if (d[i + 3] <= 8) d.set(mean, i); };
+  fillClear(a0);
+  const mipmaps = [base];
+  for (let w = w0, h = h0, prev = g0.canvas; w > 1 || h > 1;) {
+    w = Math.max(1, w >> 1); h = Math.max(1, h >> 1);
+    const g = Object.assign(document.createElement('canvas'), { width: w, height: h }).getContext('2d', { willReadFrequently: true });
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(prev, 0, 0, w, h);
+    const level = g.getImageData(0, 0, w, h), d = level.data, hist = new Uint32Array(256);
+    for (let i = 3; i < d.length; i += 4) hist[d[i]]++;
+    // Smallest alpha t with as many pixels >= t as level 0 had >= 128; scale so t lands on 0.5.
+    let t = 255;
+    for (let n = 0, want = coverage * w * h; t > 1 && n + hist[t] < want; t--) n += hist[t];
+    const s = 128 / t;
+    for (let i = 3; i < d.length; i += 4) d[i] = Math.min(255, d[i] * s);
+    fillClear(d);
+    mipmaps.push(level);
+    prev = g.canvas;
+  }
+  const tex = textureFrom(img);
+  Object.assign(tex, { mipmaps, generateMipmaps: false });
+  tex.userData.cutout = true;
+  return tex;
+}
+
 // SurfaceAppearance emission: the grayscale mask times the ColorMap (tint/strength go on the material).
 export async function loadEmissiveTexture(maskUrl, colorUrl) {
   const mask = await loadImage(maskUrl);

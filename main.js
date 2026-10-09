@@ -35,6 +35,8 @@ async function writeConfig(cfg) {
 }
 
 const inflight = new Map();
+// The CDN sometimes ends a zstd body early without an error; a PNG cut short decodes with its bottom rows blank.
+const truncatedPng = (b) => b.length > 8 && b.toString('latin1', 1, 4) === 'PNG' && !b.includes('IEND', Math.max(0, b.length - 64));
 
 async function downloadAsset(id) {
   const cfg = await readConfig();
@@ -51,11 +53,15 @@ async function downloadAsset(id) {
 
   const errors = [];
   for (const attempt of attempts) {
-    try {
-      const r = await attempt();
-      if (!r.ok) { errors.push(`HTTP ${r.status}`); continue; }
-      return Buffer.from(await r.arrayBuffer());
-    } catch (e) { errors.push(e.message); }
+    for (let tries = 0; tries < 3; tries++) {
+      try {
+        const r = await attempt();
+        if (!r.ok) { errors.push(`HTTP ${r.status}`); break; }
+        const buf = Buffer.from(await r.arrayBuffer());
+        if (!truncatedPng(buf)) return buf;
+        errors.push('incomplete image');
+      } catch (e) { errors.push(e.message); break; }
+    }
   }
   throw new Error(`Asset ${id} download failed (${errors.join('; ')}). Set a Roblox API key or cookie in Settings.`);
 }
@@ -63,7 +69,7 @@ async function downloadAsset(id) {
 ipcMain.handle('asset:get', async (_e, id) => {
   if (!/^\d+$/.test(String(id))) throw new Error('Bad asset id');
   const file = path.join(CACHE(), String(id));
-  try { return await fs.readFile(file); } catch { /* not cached */ }
+  try { const buf = await fs.readFile(file); if (!truncatedPng(buf)) return buf; } catch { /* not cached */ }
   if (!inflight.has(id)) inflight.set(id, downloadAsset(id).then(async (buf) => {
     await fs.mkdir(CACHE(), { recursive: true });
     await fs.writeFile(file, buf);
@@ -691,6 +697,32 @@ async function renderTest(win) {
     if (corner) await drag(corner, [corner[0] + 60, corner[1] + 60]);
     console.log('drag result:', knob ? 'handle found' : 'no selection handle', await js(`JSON.stringify(window.__app.files[0].settings.texts.map((t) => [t.x, t.y, t.rotation, t.size, t.strokeWidth]))`));
     await new Promise((r) => setTimeout(r, 500));
+  }
+  // RIR_TEST_UNDO=1: two camera drags and a file removal with the real mouse, then Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z.
+  if (process.env.RIR_TEST_UNDO) {
+    win.focus(); win.webContents.focus();
+    for (let i = 0; i < 100 && await js(`!!document.getElementById('splash')`); i++) await wait(100);
+    await js('window.__app.select(window.__app.files[0])'); await wait(800);
+    const yaw = () => js('window.__app.files[0]?.settings.camera.yaw ?? null');
+    const key = async (keyCode, modifiers) => { for (const type of ['keyDown', 'keyUp']) { win.webContents.sendInputEvent({ type, keyCode, modifiers }); await wait(60); } await wait(300); };
+    const v = await centerOf('#view'), seen = [await yaw()];
+    for (const dx of [80, -40]) {
+      mouse('mouseMove', v); await wait(80); mouse('mouseDown', v); await wait(80);
+      for (let i = 1; i <= 6; i++) { mouse('mouseMove', [v[0] + (dx * i) / 6, v[1]], ['leftButtonDown']); await wait(40); }
+      mouse('mouseUp', [v[0] + dx, v[1]]); await wait(700);
+      seen.push(await yaw());
+    }
+    const files = () => js('window.__app.files.length');
+    const n = await files();
+    await click(await centerOf('#fileList li:first-child .del')); await wait(700);
+    const removed = await files();
+    await key('Z', ['control']);
+    const back = [await files(), await yaw()];
+    await key('Z', ['control']); const u1 = await yaw();
+    await key('Z', ['control']); const u2 = await yaw();
+    await key('Y', ['control']); const r1 = await yaw();
+    await key('Z', ['control', 'shift']); const r2 = await yaw();
+    console.log('undo:', JSON.stringify({ yaws: seen, files: [n, removed, back[0]], afterRestore: back[1], undo: [u1, u2], redo: [r1, r2] }));
   }
   await fs.writeFile(path.join(out, 'ui.png'), (await win.webContents.capturePage()).toPNG());
   app.quit();

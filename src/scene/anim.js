@@ -111,13 +111,15 @@ export function buildRig(tree, partObjects, skinned = []) {
     if (cls === 'Motor6D' || cls === 'Motor' || cls === 'Weld' || cls === 'ManualWeld' || cls === 'Snap' || cls === 'Glue') {
       if (!isPart(p.part0 ?? {}) || !isPart(p.part1 ?? {})) continue;
       edges.push({ a: p.part0, b: p.part1, c0: cframeMatrix(p.c0), c1inv: cframeMatrix(p.c1).invert(), animated: cls === 'Motor6D' || cls === 'Motor' });
-    } else if (cls === 'AnimationConstraint') {
+    } else if (cls === 'AnimationConstraint' || (cls === 'RigidConstraint' && p.enabled !== false)) {
       const a0 = p.attachment0, a1 = p.attachment1;
       if (!a0 || !a1 || !isPart(a0.parent ?? {}) || !isPart(a1.parent ?? {})) continue;
-      edges.push({ a: a0.parent, b: a1.parent, c0: cframeMatrix(a0.props.cframe), c1inv: cframeMatrix(a1.props.cframe).invert(), animated: true });
+      edges.push({ a: a0.parent, b: a1.parent, c0: cframeMatrix(a0.props.cframe), c1inv: cframeMatrix(a1.props.cframe).invert(), animated: cls === 'AnimationConstraint' });
     } else if (cls === 'WeldConstraint' && p.enabled !== false) {
-      if (!isPart(p.part0 ?? {}) || !isPart(p.part1 ?? {})) continue;
-      edges.push({ a: p.part0, b: p.part1, c0: saved(p.part0).invert().multiply(saved(p.part1)), c1inv: new THREE.Matrix4(), animated: false });
+      // Files store WeldConstraint parts as Part0Internal/Part1Internal.
+      const a = p.part0 ?? p.part0internal, b = p.part1 ?? p.part1internal;
+      if (!isPart(a ?? {}) || !isPart(b ?? {})) continue;
+      edges.push({ a, b, c0: saved(a).invert().multiply(saved(b)), c1inv: new THREE.Matrix4(), animated: false });
     }
   }
   const bones = tree.all.filter((i) => i.className === 'Bone');

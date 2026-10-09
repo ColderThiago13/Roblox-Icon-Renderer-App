@@ -28,6 +28,7 @@ const status = (t) => { $('status').textContent = t; };
 function newFile(props) {
   const file = { id: nextId++, path: null, disabled: [], animSel: '', animTime: 0, checked: true, warnings: new Set(), status: 'loading', job: null, thumb: '', ...props };
   files.push(file);
+  checkpointSoon();
   return file;
 }
 
@@ -1311,6 +1312,7 @@ function receiveStudio(items) {
 window.native.onStudioItems((items) => {
   const got = receiveStudio(items);
   if (got.length) select(got.at(-1));
+  checkpointSoon();
   status(`Received ${items.length} item${items.length === 1 ? '' : 's'} from Roblox Studio`);
 });
 let pluginState = null;
@@ -1473,6 +1475,83 @@ renderWorkspace();
   prefsLoaded.then(() => (prefs.splash ? schedule() : hide()));
 }
 
+// ---------------- undo / redo ----------------
+// Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z). Snapshots of what the user edits — open files, each file's settings, disabled
+// parts, chosen animation and checkbox — taken once changes settle, so a slider or camera drag is a single step.
+// Playback times are left out: playing an animation or VFX isn't an edit.
+const undoLog = { past: [], future: [], last: null, timer: 0 };
+const settingsKey = (f) => JSON.stringify(f.settings, function (k, v) { return k === 'time' && this === f.settings.vfx ? undefined : v; });
+function snapshot() {
+  const prev = new Map(undoLog.last?.files.map((x) => [x.file, x]));
+  return { files: files.map((f) => {
+    const settings = settingsKey(f), old = prev.get(f);
+    // Unchanged settings reuse the previous string, so a long history doesn't hold many copies of a background image.
+    return { file: f, settings: old?.settings === settings ? old.settings : settings, disabled: [...f.disabled], animSel: f.animSel, checked: f.checked };
+  }) };
+}
+const sameEntry = (a, b) => !!a && !!b && a.file === b.file && a.settings === b.settings && a.animSel === b.animSel && a.checked === b.checked && a.disabled.join('\n') === b.disabled.join('\n');
+const sameSnap = (a, b) => a.files.length === b.files.length && a.files.every((x, i) => sameEntry(x, b.files[i]));
+
+function checkpoint() {
+  clearTimeout(undoLog.timer);
+  if (savedSession == null || axState) return; // not restored yet / an export is moving the camera and clock
+  const s = snapshot();
+  if (undoLog.last && sameSnap(s, undoLog.last)) return;
+  if (undoLog.last) { undoLog.past.push(undoLog.last); if (undoLog.past.length > 100) undoLog.past.shift(); undoLog.future = []; }
+  undoLog.last = s;
+}
+const checkpointSoon = () => { clearTimeout(undoLog.timer); undoLog.timer = setTimeout(checkpoint, 400); };
+for (const ev of ['input', 'change', 'click', 'pointerup', 'wheel', 'keyup', 'drop']) addEventListener(ev, checkpointSoon, true);
+sessionRestored.then(checkpoint);
+
+function applySnapshot(s, from) {
+  undoLog.last = s;
+  const was = new Map(from.files.map((x) => [x.file, x]));
+  const changed = s.files.filter((x) => !sameEntry(x, was.get(x.file))).map((x) => x.file);
+  files.splice(0, files.length, ...s.files.map((x) => x.file));
+  for (const x of s.files) {
+    const f = x.file, reload = f.disabled.join('\n') !== x.disabled.join('\n');
+    if (settingsKey(f) !== x.settings) {
+      const time = f.settings.vfx.time;
+      f.settings = withDefaults(JSON.parse(x.settings));
+      f.settings.vfx.time = time;
+      thumb(f, 100);
+    }
+    Object.assign(f, { disabled: [...x.disabled], checked: x.checked });
+    if (f.animSel !== x.animSel) { f.animSel = x.animSel; f.animTime = 0; if (f.job && !reload) restoreAnimation(f); else if (!x.animSel) thumb(f, 100); }
+    if (reload) load(f);
+  }
+  // Show the file the step changed (or stay put); a file that came back or went away updates the list either way.
+  const show = files.includes(current) && !changed.length ? current : changed[0] ?? (files.includes(current) ? current : files[0]);
+  if (show) select(show);
+  else { current = null; renderList(); buildPanel(); renderWarnings(); syncAnimBar(); requestPreview(); renderWorkspace(); }
+}
+function undo() {
+  checkpoint();
+  const s = undoLog.past.pop();
+  if (!s) return status('Nothing to undo');
+  undoLog.future.push(undoLog.last);
+  applySnapshot(s, undoLog.future.at(-1));
+  status('Undo');
+}
+function redo() {
+  checkpoint();
+  const s = undoLog.future.pop();
+  if (!s) return status('Nothing to redo');
+  undoLog.past.push(undoLog.last);
+  applySnapshot(s, undoLog.past.at(-1));
+  status('Redo');
+}
+addEventListener('keydown', (e) => {
+  const k = e.key.toLowerCase();
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || (k !== 'z' && k !== 'y')) return;
+  const a = document.activeElement;
+  // Typing fields keep their own text undo; dialogs (settings, export…) aren't part of the undoLog.
+  if (a?.tagName === 'TEXTAREA' || (a?.tagName === 'INPUT' && /^(text|search|url|email|password)$/.test(a.type)) || document.querySelector('dialog[open]')) return;
+  e.preventDefault();
+  if (k === 'y' || e.shiftKey) redo(); else undo();
+});
+
 // AI agents (MCP): main forwards each tool call here; handlers live in agent.js.
 const agent = createAgent({
   files, current: () => current, aspect: aspectOf, addBytes, receiveStudio, addAssetIds, removeFile, select, splitOut, setDisabled, load,
@@ -1483,6 +1562,7 @@ const agent = createAgent({
 window.native.onAgentCall(async (method, params) => {
   if (!Object.hasOwn(agent, method)) throw new Error(`Unknown agent call ${method}`);
   const result = await agent[method](params ?? {});
+  checkpointSoon(); // agent edits are undoable too
   status(`AI agent: ${method.replace(/[A-Z]/g, (c) => ' ' + c.toLowerCase())}`);
   return result;
 });
