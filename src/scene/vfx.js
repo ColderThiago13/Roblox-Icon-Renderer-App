@@ -2,7 +2,7 @@
 // Everything renders premultiplied so LightEmission blends between alpha (0) and additive (1) like Roblox.
 // Built once per file; update(time) re-simulates cheaply so the timeline can scrub and play.
 import * as THREE from 'three';
-import { loadTexture, loadImage, textureFrom } from './assets.js';
+import { loadTexture, loadImage, textureFrom, shared } from './assets.js';
 import { worldMatrix, isPart, color3 } from './build.js';
 import { nameOf } from '../rbx/instance.js';
 
@@ -101,7 +101,7 @@ async function textureFor(url, fallbackKind, warn, label) {
   }
   // Built-in textures come from the local Roblox install; without one, the look-alikes below stand in.
   if (url && /^\s*rbxasset:\/\//i.test(url)) {
-    try { return /fire_main/i.test(url) ? alphaOnly(await loadImage(url)) : await loadTexture(url); } catch { /* not installed */ }
+    try { return /fire_main/i.test(url) ? await shared(`alphaOnly|${url}`, async () => alphaOnly(await loadImage(url))) : await loadTexture(url); } catch { /* not installed */ }
   }
   if (url && /sparkle/i.test(url)) return procTexture('sparkle');
   if (url && /smoke/i.test(url)) return procTexture('smoke');
@@ -122,17 +122,19 @@ function emitterConfig(inst) {
       enabled: p.enabled !== false, rate: p.rate ?? 5, emitCount: +(a.EmitCount ?? a.emitcount ?? 0), emitDelay: +(a.EmitDelay ?? 0),
       lifetime: p.lifetime ?? { min: 5, max: 10 }, speed: p.speed ?? { min: 5, max: 5 }, spread: p.spreadangle ?? { x: 0, y: 0 },
       accel: p.acceleration ?? { x: 0, y: 0, z: 0 }, drag: p.drag ?? 0,
-      size: numSeq(p.size ?? 1), squash: numSeq(p.squash ?? 0), transparency: numSeq(p.transparency ?? 0), color: colSeq(p.color ?? { r: 1, g: 1, b: 1 }),
+      // Roblox draws a particle 2 x Size studs across (Size is the half-width), envelope included.
+      size: numSeq(p.size ?? 1).map((k) => ({ ...k, v: k.v * 2, e: k.e * 2 })), squash: numSeq(p.squash ?? 0), transparency: numSeq(p.transparency ?? 0), color: colSeq(p.color ?? { r: 1, g: 1, b: 1 }),
       rotation: p.rotation ?? { min: 0, max: 0 }, rotSpeed: p.rotspeed ?? { min: 0, max: 0 },
       lightEmission: p.lightemission ?? 0, brightness: p.brightness ?? 1, lightInfluence: clamp01(p.lightinfluence ?? 0), zOffset: p.zoffset ?? 0,
       orientation: p.orientation ?? 0, emissionDir: p.emissiondirection ?? 1,
-      shape: p.shape ?? 0, shapeStyle: p.shapestyle ?? 0, shapeInOut: p.shapeinout ?? 0,
+      shape: p.shape ?? 0, shapeStyle: p.shapestyle ?? 0, shapeInOut: p.shapeinout ?? 0, shapePartial: clamp01(p.shapepartial ?? 1),
+      locked: !!p.lockedtopart, velInherit: p.velocityinheritance ?? 0,
       flipLayout: p.flipbooklayout ?? 0, flipSize: { x: p.flipbooksizex ?? 1, y: p.flipbooksizey ?? 1 }, flipMode: p.flipbookmode ?? 0,
       flipRate: p.flipbookframerate ?? { min: 1, max: 1 }, flipRandom: !!p.flipbookstartrandom, flipBlend: p.flipbookblendframes ?? true,
       timeScale: p.timescale ?? 1,
     };
   }
-  const base = { enabled: p.enabled !== false, emitCount: 0, emitDelay: 0, spread: { x: 15, y: 15 }, drag: 0, rotation: { min: 0, max: 360 }, rotSpeed: { min: -30, max: 30 }, brightness: 1, zOffset: 0, orientation: 0, emissionDir: 1, shape: 0, shapeStyle: 0, shapeInOut: 0, flipLayout: 0, timeScale: 1, squash: numSeq(0) };
+  const base = { enabled: p.enabled !== false, emitCount: 0, emitDelay: 0, spread: { x: 15, y: 15 }, drag: 0, rotation: { min: 0, max: 360 }, rotSpeed: { min: -30, max: 30 }, brightness: 1, zOffset: 0, orientation: 0, emissionDir: 1, shape: 0, shapeStyle: 0, shapeInOut: 0, shapePartial: 1, locked: false, velInherit: 0, flipLayout: 0, timeScale: 1, squash: numSeq(0) };
   if (inst.className === 'Fire') {
     const size = p.size_xml ?? p.size ?? 5, heat = p.heat_xml ?? p.heat ?? 9;
     return { ...base, texture: 'rbxasset://textures/particles/fire_main.dds', fallback: 'fire', rate: 65, lifetime: { min: 0.5, max: 1 }, speed: { min: heat * 0.4, max: heat * 0.6 }, accel: { x: 0, y: heat * 0.3, z: 0 },
@@ -161,21 +163,30 @@ function flipGrid(cfg, map) {
 }
 
 // ---------- spawn ----------
-function spawnPoint(cfg, src, rand) {
+// matrix: the source's world transform when the particle spawned (the current one for LockedToPart).
+// ShapePartial (1 = the whole shape): sphere = cap angle around EmissionDirection (0.5 = dome), disc = filled share of
+// the radius (0 = rim only), cylinder = top radius (0 = cone).
+// ponytail: disc reading inferred from 1 being the default; flip to (p, 1) if Studio shows rings at 1.
+function spawnPoint(cfg, src, rand, matrix = src.matrix) {
   const dirLocal = new THREE.Vector3(...NORMALS[cfg.emissionDir] || NORMALS[1]);
   const pos = new THREE.Vector3(), dir = dirLocal.clone();
   if (src.size) {
     const s = src.size, r3 = () => new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5);
-    if (cfg.shape === 1) { // sphere
-      const d = new THREE.Vector3(rand() * 2 - 1, rand() * 2 - 1, rand() * 2 - 1).normalize();
+    const t1 = new THREE.Vector3(dirLocal.y, dirLocal.z, dirLocal.x), t2 = new THREE.Vector3().crossVectors(dirLocal, t1);
+    const around = (ang) => t1.clone().multiplyScalar(Math.cos(ang)).addScaledVector(t2, Math.sin(ang));
+    if (cfg.shape === 1) { // sphere: uniform over the cap's area
+      const cos = 1 - rand() * (1 - Math.cos(Math.PI * cfg.shapePartial)), sin = Math.sqrt(Math.max(0, 1 - cos * cos));
+      const d = around(rand() * Math.PI * 2).multiplyScalar(sin).addScaledVector(dirLocal, cos);
       const rad = cfg.shapeStyle === 1 ? 1 : Math.cbrt(rand());
       pos.copy(d).multiplyScalar(rad * 0.5).multiply(s);
       dir.copy(d);
     } else if (cfg.shape === 2 || cfg.shape === 3) { // cylinder / disc around emission axis
-      const ang = rand() * Math.PI * 2, rad = cfg.shapeStyle === 1 ? 0.5 : Math.sqrt(rand()) * 0.5;
-      const t1 = new THREE.Vector3(dirLocal.y, dirLocal.z, dirLocal.x), t2 = new THREE.Vector3().crossVectors(dirLocal, t1);
-      const radial = t1.clone().multiplyScalar(Math.cos(ang)).addScaledVector(t2, Math.sin(ang));
-      pos.copy(radial).multiplyScalar(rad).addScaledVector(dirLocal, cfg.shape === 2 ? rand() - 0.5 : 0).multiply(s);
+      const radial = around(rand() * Math.PI * 2);
+      const inner = cfg.shape === 3 ? 1 - cfg.shapePartial : 0;
+      let rad = cfg.shapeStyle === 1 ? 0.5 : Math.sqrt(lerp(inner * inner, 1, rand())) * 0.5;
+      const h = cfg.shape === 2 ? rand() - 0.5 : 0;
+      if (cfg.shape === 2) rad *= lerp(1, cfg.shapePartial, h + 0.5);
+      pos.copy(radial).multiplyScalar(rad).addScaledVector(dirLocal, h).multiply(s);
       if (cfg.shape === 2) dir.copy(radial);
     } else if (cfg.shapeStyle === 1) { // box surface: the face toward EmissionDirection
       pos.copy(r3()).multiply(s);
@@ -192,7 +203,26 @@ function spawnPoint(cfg, src, rand) {
     dir.applyAxisAngle(ax1, THREE.MathUtils.degToRad((rand() * 2 - 1) * cfg.spread.x));
     dir.applyAxisAngle(ax2, THREE.MathUtils.degToRad((rand() * 2 - 1) * cfg.spread.y));
   }
-  return { pos: pos.applyMatrix4(src.matrix), dir: dir.transformDirection(src.matrix) };
+  return { pos: pos.applyMatrix4(matrix), dir: dir.transformDirection(matrix) };
+}
+
+// Source transform `ago` seconds before the current pose. src.history ({ step, frames: newest first }) is sampled from
+// the animation by job.updateVfx; without one (no animation) the source never moved.
+// ponytail: element-wise blend of neighbouring 30 Hz samples (slight shear in fast spins); decompose + slerp if visible.
+function matrixAgo(src, ago) {
+  const h = src.history;
+  if (!h) return src.matrix;
+  const x = Math.min(Math.max(ago, 0) / h.step, h.frames.length - 1), i = Math.floor(x), f = x - i;
+  const a = h.frames[i].elements, b = h.frames[Math.min(i + 1, h.frames.length - 1)].elements, m = new THREE.Matrix4();
+  for (let k = 0; k < 16; k++) m.elements[k] = a[k] + (b[k] - a[k]) * f;
+  return m;
+}
+const _p0 = new THREE.Vector3(), _p1 = new THREE.Vector3();
+function sourceVelocity(src, ago) {
+  if (!src.history) return _p0.set(0, 0, 0);
+  const dt = src.history.step;
+  _p1.setFromMatrixPosition(matrixAgo(src, ago + dt));
+  return _p0.setFromMatrixPosition(matrixAgo(src, ago)).sub(_p1).divideScalar(dt);
 }
 
 const hash = (a, b) => Math.imul(a ^ Math.imul(b + 0x9e3779b9, 0x85ebca6b), 0xc2b2ae35) >>> 0;
@@ -220,11 +250,14 @@ function simulate(cfg, src, grid, T, opts) {
     const rand = rng(hash(opts.seed, index));
     const life = range(cfg.lifetime, rand), age = T0 - t0;
     if (age < 0 || age >= life) continue;
-    const sp = spawnPoint(cfg, src, rand);
+    // LockedToPart off: the particle starts where the source was when it spawned and then stays in world space.
+    const ago = age / (cfg.timeScale || 1);
+    const sp = spawnPoint(cfg, src, rand, cfg.locked ? src.matrix : matrixAgo(src, ago));
     const speed = range(cfg.speed, rand), rot0 = range(cfg.rotation, rand), rotSpeed = range(cfg.rotSpeed, rand);
     const env = rand() * 2 - 1, envT = rand() * 2 - 1;
     const flipStart = cfg.flipRandom ? Math.floor(rand() * frames) : 0, flipRate = range(cfg.flipRate || { min: 1, max: 1 }, rand);
     const v0 = sp.dir.multiplyScalar(speed);
+    if (cfg.velInherit) v0.addScaledVector(sourceVelocity(src, ago), cfg.velInherit);
     let pos, vel;
     if (k > 0) {
       const term = grav.clone().divideScalar(k), e = Math.exp(-k * age);
@@ -336,8 +369,9 @@ function particleMesh(map, cfg, grid) {
     }
     mesh.userData.particles = list;
   };
-  // Back-to-front ordering per camera for correct alpha blending.
-  mesh.onBeforeRender = (_r, _s, camera) => {
+  // Back-to-front ordering per camera for correct alpha blending. Called by the renderer before drawing: three uploads
+  // attributes before onBeforeRender, so writing them there showed the previous render's particles (none on the first).
+  mesh.userData.sortFor = (camera) => {
     const particles = mesh.userData.particles;
     g.instanceCount = particles.length;
     const cp = camera.position, A = g.attributes;
@@ -468,11 +502,16 @@ export async function buildVfx(insts, warn) {
   }
   return {
     group,
-    update(time, s, poseChanged) {
+    // Sources whose past transforms matter while animating: unlocked emitters and VelocityInheritance, with the
+    // seconds of history their oldest particle needs.
+    historyNeeds: () => emitters.filter((e) => !e.cfg.locked || e.cfg.velInherit).map((e) => ({ parent: e.src.parent, span: e.cfg.lifetime.max / (e.cfg.timeScale || 1) })),
+    // history: Map(parent -> { step, frames }) from job.updateVfx, or null when nothing is animating.
+    update(time, s, poseChanged, history) {
       if (poseChanged) {
         for (const b of beams) { b.geometry.dispose(); b.geometry = beamGeometry(b.userData.inst); }
         for (const e of emitters) e.src.matrix = worldMatrix(e.src.parent);
       }
+      for (const e of emitters) e.src.history = history?.get(e.src.parent) ?? null;
       group.traverse((o) => { if (o.material?.uniforms?.litLight) o.material.uniforms.litLight.value = s.litLight ?? 2; });
       for (const b of beams) b.material.uniforms.scroll.value = time * b.userData.speed;
       for (const e of emitters) e.mesh.userData.setParticles(simulate(e.cfg, e.src, e.grid, time, { ...s, seed: hash(s.seed, e.index) }));

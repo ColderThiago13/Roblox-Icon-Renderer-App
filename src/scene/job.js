@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { parseModel } from '../rbx/model.js';
 import { renderTree, atPath } from '../rbx/instance.js';
-import { buildScene } from './build.js';
+import { buildScene, worldMatrix } from './build.js';
 import { buildVfx } from './vfx.js';
 import { buildTrails, attachmentSample } from './trails.js';
 import { samplePoints, boundsOf, LAYER } from '../render/renderer.js';
@@ -45,6 +45,22 @@ export async function createJob(name, bytes, warn, path = null, disabled = []) {
   job.trailGroup = job.trailSystem?.group ?? null;
   job.trailGroup?.traverse((o) => o.layers.set(LAYER.TRAIL));
   return job;
+}
+
+// Frees a job's GPU buffers, textures and shader programs now instead of whenever GC runs. Shared caches (meshes,
+// textures) stay valid: three re-uploads anything another file (or an undone removal) still draws on its next render.
+export function disposeJob(job) {
+  if (!job) return;
+  const seen = new Set();
+  for (const group of [job.root, job.vfxGroup, job.trailGroup, job.hlGroup]) group?.traverse((o) => {
+    if (o.geometry && !seen.has(o.geometry)) { seen.add(o.geometry); o.geometry.dispose(); }
+    for (const m of [o.material].flat()) {
+      if (!m || seen.has(m)) continue;
+      seen.add(m);
+      for (const v of [...Object.values(m), ...Object.values(m.uniforms ?? {}).map((u) => u.value)]) if (v?.isTexture) v.dispose();
+      m.dispose();
+    }
+  });
 }
 
 // Sample motion from the selected animation, so scrubbing/export never depends on playback history.
@@ -101,10 +117,37 @@ export function setPose(job, track, time) {
   return true;
 }
 
+// Past world transforms of moving emitter sources (newest first), so unlocked particles stay where they spawned.
+// Re-sampled only when the pose changes; null when nothing animates.
+function vfxHistory(job) {
+  if (!job.rig || !job.poseTrack) return null;
+  const key = job.poseTime;
+  if (job.vfxHistoryKey === key && job.vfxHistoryTrack === job.poseTrack) return job.vfxHistory;
+  const needs = job.vfxSystem.historyNeeds();
+  let history = null;
+  if (needs.length) {
+    // ponytail: up to 120 re-poses per pose change (30 Hz, coarser past 4 s of lifetime); cache across frames if playback lags.
+    const span = Math.min(10, Math.max(...needs.map((n) => n.span))), step = Math.max(1 / 30, span / 120);
+    const steps = Math.ceil(span / step) + 1;
+    history = new Map(needs.map((n) => [n.parent, { step, frames: [] }]));
+    try {
+      for (let i = 0; i <= steps; i++) {
+        job.rig.apply(job.poseTrack, job.poseTime - i * step, true);
+        for (const [parent, h] of history) h.frames.push(worldMatrix(parent));
+      }
+    } finally {
+      job.rig.apply(job.poseTrack, job.poseTime, true);
+      job.root.updateMatrixWorld(true);
+    }
+  }
+  Object.assign(job, { vfxHistory: history, vfxHistoryKey: key, vfxHistoryTrack: job.poseTrack });
+  return history;
+}
+
 // Re-simulates VFX at vfxSettings.time (cheap: no texture/geometry loading).
 export function updateVfx(job, vfxSettings, poseChanged = false) {
   if (!job.vfxSystem) return;
   const { time, seed, includeBursts, maxParticles, prewarm, litLight } = vfxSettings;
-  job.vfxSystem.update(time, { seed, includeBursts, maxParticles, prewarm, litLight }, poseChanged);
+  job.vfxSystem.update(time, { seed, includeBursts, maxParticles, prewarm, litLight }, poseChanged, vfxHistory(job));
   job.vfxPoints = samplePoints(job.vfxGroup);
 }

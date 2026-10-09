@@ -4,6 +4,20 @@
 
 const ascii = new TextDecoder('latin1');
 
+// Some uploaded meshes carry NaN vertices (seen only in lower LODs). Bounds and framing read every vertex, so one NaN
+// blanked the whole render: move them onto a real vertex, zero their normals/UVs.
+export function finiteVerts(positions, normals, uvs) {
+  const n = positions.length / 3;
+  const ok = (i) => Number.isFinite(positions[i * 3]) && Number.isFinite(positions[i * 3 + 1]) && Number.isFinite(positions[i * 3 + 2]);
+  let anchor = -1;
+  for (let i = 0; i < n && anchor < 0; i++) if (ok(i)) anchor = i;
+  for (let i = 0; i < n; i++) {
+    if (!ok(i)) for (let k = 0; k < 3; k++) positions[i * 3 + k] = anchor < 0 ? 0 : positions[anchor * 3 + k];
+    if (normals) for (let k = 0; k < 3; k++) if (!Number.isFinite(normals[i * 3 + k])) normals[i * 3 + k] = 0;
+    if (uvs) for (let k = 0; k < 2; k++) if (!Number.isFinite(uvs[i * 2 + k])) uvs[i * 2 + k] = 0;
+  }
+}
+
 function fromVerts(dv, off, numVerts, vsize, faceOff, faces) {
   const positions = new Float32Array(numVerts * 3), normals = new Float32Array(numVerts * 3), uvs = new Float32Array(numVerts * 2);
   const colors = vsize >= 40 ? new Float32Array(numVerts * 4) : null;
@@ -20,6 +34,7 @@ function fromVerts(dv, off, numVerts, vsize, faceOff, faces) {
   }
   const indices = new Uint32Array(faces * 3);
   for (let i = 0; i < faces * 3; i++) indices[i] = dv.getUint32(faceOff + i * 4, true);
+  finiteVerts(positions, normals, uvs);
   return { positions, normals, uvs, colors: allWhite ? null : colors, indices };
 }
 

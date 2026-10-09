@@ -126,33 +126,59 @@ export function withDefaults(saved) {
 
 export const clone = (o) => JSON.parse(JSON.stringify(o));
 
+// One schema field: the accepted (clamped) value, or undefined when v doesn't fit the field.
+function checkValue(f, v) {
+  switch (f.type) {
+    case 'range': { const n = Number(v); return Number.isFinite(n) ? Math.min(f.max, Math.max(f.min, n)) : undefined; }
+    case 'bool': return typeof v === 'boolean' ? v : undefined;
+    case 'color': return /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : undefined;
+    case 'select': return f.options.includes(v) ? v : undefined;
+    case 'image': return typeof v === 'string' && (v === '' || v.startsWith('data:image/')) ? v : undefined;
+    case 'textarea': return typeof v === 'string' || typeof v === 'number' ? String(v) : undefined;
+    case 'font': return typeof v === 'string' && /^[^"\\;{}]{1,100}$/.test(v.trim()) ? v.trim() : undefined; // goes into a CSS font string
+    case 'weight': { const n = Math.round(Number(v)); return n >= 1 && n <= 1000 ? n : undefined; }
+  }
+}
+const expected = (f) => (f.type === 'select' ? f.options.join(' | ') : f.type === 'range' ? `number ${f.min}..${f.max}` : f.type);
+
+// Validates and applies { key: value } for one schema section (or a text layer) into target; notes what was dropped.
+function applyFields(target, fields, vals, label, notes) {
+  for (const [k, v] of Object.entries(vals)) {
+    const f = fields.find((x) => x.key === k);
+    if (!f) { notes.push(`unknown setting ${label}.${k}`); continue; }
+    const val = checkValue(f, v);
+    if (val === undefined) { notes.push(`ignored ${label}.${k}: expected ${expected(f)}`); continue; }
+    if (f.type === 'range' && val !== Number(v)) notes.push(`${label}.${k} clamped to ${val}`);
+    target[k] = val;
+  }
+}
+
 // Edits from AI agents: merges { section: { key: value }, texts: [layers] } into settings, checking every key, type,
-// range and option against the schema. A lighting preset applies first, so explicit values in the same patch win.
-// Returns notes about anything ignored or clamped.
+// range and option against the schema (text layers against TEXT_FIELDS). A lighting preset applies first, so explicit
+// values in the same patch win. Returns notes about anything ignored or clamped.
 export function patchSettings(settings, patch) {
   const notes = [];
   for (const [id, vals] of Object.entries(patch ?? {})) {
     if (id === 'texts') {
-      if (Array.isArray(vals)) settings.texts = vals.map((t) => textLayer(t && typeof t === 'object' ? t : { text: String(t) }));
-      else notes.push('texts must be an array of text layers');
+      if (!Array.isArray(vals)) { notes.push('texts must be an array of text layers'); continue; }
+      const ids = new Set();
+      settings.texts = vals.flatMap((t, i) => {
+        if (typeof t === 'string') t = { text: t };
+        if (!t || typeof t !== 'object' || Array.isArray(t)) { notes.push(`texts[${i}] ignored: expected a text layer object`); return []; }
+        const { id: wantId, gradient, ...fields } = t;
+        const layer = textLayer();
+        if (gradient && !fields.fill) layer.fill = 'gradient'; // layers saved before fill modes
+        applyFields(layer, TEXT_FIELDS, fields, `texts[${i}]`, notes);
+        if (typeof wantId === 'string' && wantId && !ids.has(wantId)) layer.id = wantId;
+        ids.add(layer.id);
+        return [layer];
+      });
       continue;
     }
     const sec = SCHEMA.find((x) => x.id === id);
     if (!sec || !vals || typeof vals !== 'object') { notes.push(`unknown section "${id}"`); continue; }
     if (id === 'lighting' && LIGHTING_PRESETS[vals.preset]) for (const [sid, pv] of Object.entries(LIGHTING_PRESETS[vals.preset])) Object.assign(settings[sid], pv);
-    for (const [k, v] of Object.entries(vals)) {
-      const f = sec.fields.find((x) => x.key === k);
-      if (!f) { notes.push(`unknown setting ${id}.${k}`); continue; }
-      let val;
-      if (f.type === 'range') { val = Number(v); if (Number.isFinite(val)) val = Math.min(f.max, Math.max(f.min, val)); else val = undefined; }
-      else if (f.type === 'bool') val = typeof v === 'boolean' ? v : undefined;
-      else if (f.type === 'color') val = /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : undefined;
-      else if (f.type === 'select') val = f.options.includes(v) ? v : undefined;
-      else if (f.type === 'image') val = typeof v === 'string' && (v === '' || v.startsWith('data:image/')) ? v : undefined;
-      if (val === undefined) { notes.push(`ignored ${id}.${k}: expected ${f.type === 'select' ? f.options.join(' | ') : f.type}`); continue; }
-      if (f.type === 'range' && val !== Number(v)) notes.push(`${id}.${k} clamped to ${val}`);
-      settings[id][k] = val;
-    }
+    applyFields(settings[id], sec.fields, vals, id, notes);
   }
   return notes;
 }

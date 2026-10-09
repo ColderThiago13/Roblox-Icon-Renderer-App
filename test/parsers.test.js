@@ -67,6 +67,12 @@ if (dir && fs.existsSync(dir)) {
   assert.equal(mesh.positions[3], 1);
   assert.equal(mesh.uvs[1], 0.75);
   assert.equal(mesh.colors, null);
+  // NaN vertex (real asset 4681227436 has some, used only by lower LODs): moved onto a real vertex, never left as NaN
+  body.setFloat32(12 + 40, NaN, true); body.setFloat32(12 + 40 + 12, NaN, true);
+  buf.set(new Uint8Array(body.buffer), head.length);
+  const bad = parseMesh(buf.buffer);
+  assert.ok([...bad.positions, ...bad.normals, ...bad.uvs].every(Number.isFinite), 'no NaN survives');
+  assert.deepEqual([...bad.positions.slice(3, 6)], [...bad.positions.slice(0, 3)]);
 }
 
 // v1.00 text mesh is half scale

@@ -262,6 +262,12 @@ assert.equal(hitText([L], 0.6 + 0.03, 0.3), null);
   assert.equal(st.lighting.rim, 3); assert.equal(st.lighting.key, 1); assert.equal(st.lighting.preset, 'dramatic');
   assert.equal(st.texts.length, 1); assert.equal(st.texts[0].text, 'HI'); assert.equal(st.texts[0].size, 64);
   for (const n of ['camera.yaw clamped to 180', 'unknown setting camera.nope', 'ignored outline.color: expected color', 'unknown section "bogus"']) assert.ok(notes.includes(n), n);
+  // text layers are checked field by field too; bad values keep the default and are reported
+  const tn = patchSettings(st, { texts: [{ text: 42, size: 1e6, fill: 'bogus', color: 'red', font: '"x', id: 'a', nope: 1 }, { id: 'a' }, null, 'plain'] });
+  assert.equal(st.texts.length, 3);
+  assert.deepEqual([st.texts[0].text, st.texts[0].size, st.texts[0].fill, st.texts[0].color, st.texts[0].font], ['42', 400, 'solid', '#ffffff', 'Builder Sans']);
+  assert.equal(st.texts[2].text, 'plain'); assert.equal(st.texts[0].id, 'a'); assert.notEqual(st.texts[1].id, 'a', 'duplicate ids get a fresh one');
+  for (const n of ['texts[0].size clamped to 400', 'ignored texts[0].fill: expected solid | gradient | radial | rainbow', 'ignored texts[0].color: expected color', 'ignored texts[0].font: expected font', 'unknown setting texts[0].nope', 'texts[2] ignored: expected a text layer object']) assert.ok(tn.includes(n), n);
 }
 { // SurfaceAppearance maps come from *Content props or the TexturePack XML; explicit props win
   const pack = `<roblox>

@@ -1,12 +1,13 @@
 import * as THREE from 'three';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
-import { parseMesh, lod0 } from '../rbx/mesh.js';
+import { parseMesh, lod0, finiteVerts } from '../rbx/mesh.js';
 import { assetId } from '../rbx/instance.js';
 import { decodeDds } from '../rbx/dds.js';
 
 const bytesCache = new Map();
 const imageCache = new Map();
 const meshCache = new Map();
+const texCache = new Map();
 const draco = new DRACOLoader().setDecoderPath('node_modules/three/examples/jsm/libs/draco/');
 
 export function getAssetBytes(url) {
@@ -32,7 +33,7 @@ export function getAssetBytes(url) {
   return bytesCache.get(id);
 }
 
-export function clearMemoryCache() { bytesCache.clear(); imageCache.clear(); meshCache.clear(); }
+export function clearMemoryCache() { bytesCache.clear(); imageCache.clear(); meshCache.clear(); texCache.clear(); }
 
 // DDS pixels on a canvas that answers naturalWidth/Height like a decoded <img>.
 export function ddsCanvas(bytes) {
@@ -66,26 +67,55 @@ export function textureFrom(source, srgb = true) {
   return tex;
 }
 
-export async function loadTexture(url, srgb = true) {
-  return textureFrom(await loadImage(url), srgb);
+// One GPU upload per distinct image: callers get clones (own repeat/wrap, safe to dispose) sharing the cached
+// texture's Source, which three uploads once. Without this a map with 587 decals of 6 images uploaded 587 copies.
+export function shared(key, make) {
+  if (!texCache.has(key)) {
+    const p = make();
+    p.catch(() => texCache.delete(key));
+    texCache.set(key, p);
+  }
+  return texCache.get(key).then((t) => t.clone());
+}
+const imageIds = new WeakMap();
+let lastImageId = 0;
+const imageId = (img) => { if (!imageIds.has(img)) imageIds.set(img, ++lastImageId); return imageIds.get(img); };
+
+export function loadTexture(url, srgb = true) {
+  return shared(`tex|${srgb}|${url}`, async () => textureFrom(await loadImage(url), srgb));
 }
 
-// Texture drawn over a solid color: Roblox shows the part Color through transparent texture pixels.
-export async function loadOverlayTexture(url, color) {
-  const img = await loadImage(url);
-  const c = document.createElement('canvas');
-  c.width = img.naturalWidth; c.height = img.naturalHeight;
-  const g = c.getContext('2d');
-  g.fillStyle = '#' + color.getHexString(THREE.SRGBColorSpace);
-  g.fillRect(0, 0, c.width, c.height);
-  g.drawImage(img, 0, 0);
-  return textureFrom(c);
+// Texture drawn over a solid color: Roblox shows the part Color through transparent texture pixels. tint (the
+// SurfaceAppearance Color) multiplies the texture only, not the part color showing through.
+export function loadOverlayTexture(url, color, tint = null) {
+  const hex = (c) => c ? '#' + c.getHexString(THREE.SRGBColorSpace) : '';
+  return shared(`overlay|${hex(color)}|${hex(tint)}|${url}`, async () => {
+    const img = await loadImage(url);
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const g = c.getContext('2d');
+    let top = img;
+    if (tint && tint.getHex() !== 0xffffff) {
+      top = Object.assign(document.createElement('canvas'), { width: c.width, height: c.height });
+      const t = top.getContext('2d');
+      t.drawImage(img, 0, 0);
+      t.globalCompositeOperation = 'multiply'; t.fillStyle = hex(tint); t.fillRect(0, 0, c.width, c.height);
+      t.globalCompositeOperation = 'destination-in'; t.drawImage(img, 0, 0); // multiply made clear texels opaque
+    }
+    g.fillStyle = hex(color);
+    g.fillRect(0, 0, c.width, c.height);
+    g.drawImage(top, 0, 0);
+    return textureFrom(c);
+  });
 }
 
 // Color map with a transparent alpha (SurfaceAppearance AlphaMode.Transparency). Mostly hard-edged alpha (foliage, hair
 // cards, grates) -> userData.cutout, with mipmaps whose alpha keeps the same share of pixels >= 0.5: plain mips average
 // a leaf card to a uniform ~0.45, so an alpha-tested canopy would dissolve with distance.
-export async function loadAlphaTexture(url) {
+export function loadAlphaTexture(url) {
+  return shared(`alpha|${url}`, () => alphaTexture(url));
+}
+async function alphaTexture(url) {
   const img = await loadImage(url);
   const w0 = img.naturalWidth, h0 = img.naturalHeight;
   const g0 = Object.assign(document.createElement('canvas'), { width: w0, height: h0 }).getContext('2d', { willReadFrequently: true });
@@ -123,14 +153,17 @@ export async function loadAlphaTexture(url) {
   return tex;
 }
 
-// SurfaceAppearance emission: the grayscale mask times the ColorMap (tint/strength go on the material).
-export async function loadEmissiveTexture(maskUrl, colorUrl) {
+// SurfaceAppearance emission: the grayscale mask times the albedo image (Color/tint/strength go on the material).
+export function loadEmissiveTexture(maskUrl, albedo) {
+  return shared(`emissive|${albedo ? imageId(albedo) : ''}|${maskUrl}`, () => emissiveTexture(maskUrl, albedo));
+}
+async function emissiveTexture(maskUrl, albedo) {
   const mask = await loadImage(maskUrl);
   const c = document.createElement('canvas');
   c.width = mask.naturalWidth; c.height = mask.naturalHeight;
   const g = c.getContext('2d');
   g.drawImage(mask, 0, 0);
-  if (colorUrl) { g.globalCompositeOperation = 'multiply'; g.drawImage(await loadImage(colorUrl), 0, 0, c.width, c.height); }
+  if (albedo) { g.globalCompositeOperation = 'multiply'; g.drawImage(albedo, 0, 0, c.width, c.height); }
   return textureFrom(c);
 }
 
@@ -168,6 +201,7 @@ async function meshFromBytes(bytes) {
     const faces = lod0(m.lods, g.index.count / 3);
     if (faces * 3 < g.index.count) g.setIndex(new THREE.BufferAttribute(g.index.array.slice(0, faces * 3), 1));
   }
+  finiteVerts(g.attributes.position.array, g.attributes.normal?.array, uv?.array);
   if (!g.attributes.normal) g.computeVertexNormals();
   if (m.skin && m.skin.joints.length === g.attributes.position.count * 4) g.userData.skin = m.skin;
   return g;

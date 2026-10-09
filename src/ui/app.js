@@ -1,5 +1,5 @@
 import { IconRenderer, cropOf } from '../render/renderer.js';
-import { createJob, updateVfx, updateTrails, setPose } from '../scene/job.js';
+import { createJob, updateVfx, updateTrails, setPose, disposeJob } from '../scene/job.js';
 import { wheelZoom } from './zoom.js';
 import { loadAnimationId } from '../scene/anim.js';
 import { assetId, nameOf, pathOf, atPath } from '../rbx/instance.js';
@@ -10,7 +10,7 @@ import { createAgent } from './agent.js';
 import { frameTimes, gifDelays, sheetLayout, flatten, opaqueSamples, MAX_GIF_SIZE, MAX_SHEET, frameSizeForSheet, spinFit } from './animexport.js';
 
 const $ = (id) => document.getElementById(id);
-const canvas = $('view');
+let canvas = $('view'); // replaced after a GPU reset
 const renderer = new IconRenderer(canvas);
 const files = [];
 let current = null;
@@ -22,6 +22,8 @@ const store = {
 };
 const baseSettings = () => withDefaults(store.get('defaultSettings', null));
 const status = (t) => { $('status').textContent = t; };
+renderer.onLost = () => status('The GPU was reset (out of video memory or a driver crash). Waiting for it to come back...');
+renderer.onRestore = (fresh) => { canvas = fresh; bindCanvas(fresh); status('GPU restored'); requestPreview(); for (const f of files) thumb(f); };
 
 // ---------------- files ----------------
 // src: key of the source file's bytes in the saved session (shared by models split out of it); path: see subtree().
@@ -54,6 +56,7 @@ function addBytes(name, bytes, extra = {}) {
 }
 
 async function load(file) {
+  disposeJob(file.job);
   file.status = 'loading'; file.error = null; file.warnings.clear(); file.job = null;
   renderList();
   const warn = (m) => { file.warnings.add(m); if (file === current) renderWarnings(); };
@@ -80,6 +83,7 @@ function select(file) {
 
 function removeFile(file) {
   files.splice(files.indexOf(file), 1);
+  disposeJob(file.job); // an undo brings the file back; its resources re-upload on the next render
   if (current === file) current = files[0] || null;
   renderList(); buildPanel(); renderWarnings(); requestPreview(); renderWorkspace();
 }
@@ -439,7 +443,8 @@ function thumb(file, delay = 0) {
   thumbTimers.set(file, setTimeout(async () => {
     await overlayReady(file.settings);
     if (!file.job) return;
-    const img = draw(file, 112, { out: 'pixels' });
+    let img;
+    try { img = draw(file, 112, { out: 'pixels' }); } catch { return; } // GPU reset: onRestore redraws thumbnails
     const c = document.createElement('canvas'); c.width = c.height = 112;
     c.getContext('2d').putImageData(img, 0, 0);
     file.thumb = c.toDataURL();
@@ -730,73 +735,77 @@ const framePoint = (e) => { const r = canvas.getBoundingClientRect(); return [(e
 const round3 = (v) => Math.round(v * 1000) / 1000;
 const bgImageActive = () => current?.settings.background.mode === 'image' && !!current.settings.background.image;
 
-canvas.addEventListener('pointerdown', (e) => {
-  if (!current) return;
-  canvas.setPointerCapture(e.pointerId);
-  const [px, py] = framePoint(e);
-  const hit = e.button === 0 && !e.altKey ? hitText(previewLayouts, px, py) : null;
-  if (hit) {
-    selectText(hit);
-    const t = layerOf(current, hit);
-    drag = { mode: 'move', id: hit, px, py, x: t.x, y: t.y };
-    return;
-  }
-  if (selectedText) selectText(null);
-  if (e.altKey && bgImageActive()) drag = { mode: 'bg', x: e.clientX, y: e.clientY };
-  else drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey };
-});
-canvas.addEventListener('pointermove', (e) => {
-  if (!drag || drag.handle) return;
-  if (drag.mode === 'move') {
+// Bound again when a GPU reset gives the preview a fresh canvas (renderer.onRestore).
+function bindCanvas(c) {
+  c.addEventListener('pointerdown', (e) => {
+    if (!current) return;
+    canvas.setPointerCapture(e.pointerId);
     const [px, py] = framePoint(e);
-    setText(drag.id, { x: round3(clamp(drag.x + px - drag.px, -0.5, 0.5)), y: round3(clamp(drag.y - (py - drag.py), -0.5, 0.5)) });
-    return;
-  }
-  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-  drag.x = e.clientX; drag.y = e.clientY;
-  if (drag.mode === 'bg') {
-    const b = current.settings.background, k = 1 / canvas.clientWidth;
-    setValue('background', 'imageX', round3(clamp(b.imageX + dx * k, -1, 1)));
-    setValue('background', 'imageY', round3(clamp(b.imageY - dy * k, -1, 1)));
-    syncField('background', 'imageX'); syncField('background', 'imageY');
-    return;
-  }
-  const c = current.settings.camera;
-  if (drag.pan) {
-    const k = 1 / canvas.clientWidth;
-    setValue('camera', 'offsetX', clamp(+(c.offsetX + dx * k).toFixed(3), -0.5, 0.5));
-    setValue('camera', 'offsetY', clamp(+(c.offsetY - dy * k).toFixed(3), -0.5, 0.5));
-    syncField('camera', 'offsetX'); syncField('camera', 'offsetY');
-  } else {
-    setValue('camera', 'yaw', wrap180(c.yaw - dx * 0.5));
-    setValue('camera', 'pitch', clamp(Math.round(c.pitch + dy * 0.4), -89, 89));
-    syncField('camera', 'yaw'); syncField('camera', 'pitch');
-  }
-});
-canvas.addEventListener('pointerup', () => { drag = null; });
-canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-canvas.addEventListener('dblclick', (e) => {
-  const hit = current && hitText(previewLayouts, ...framePoint(e));
-  if (!hit) return;
-  selectText(hit);
-  openTextEdit(hit);
-});
-canvas.addEventListener('wheel', (e) => {
-  if (!current) return;
-  e.preventDefault();
-  const steps = -e.deltaY / (e.deltaMode === 1 ? 3 : 100), hit = !e.altKey && hitText(previewLayouts, ...framePoint(e));
-  if (hit) {
-    const t = layerOf(current, hit), f = 1.1 ** (e.ctrlKey ? steps / 5 : steps);
+    const hit = e.button === 0 && !e.altKey ? hitText(previewLayouts, px, py) : null;
+    if (hit) {
+      selectText(hit);
+      const t = layerOf(current, hit);
+      drag = { mode: 'move', id: hit, px, py, x: t.x, y: t.y };
+      return;
+    }
+    if (selectedText) selectText(null);
+    if (e.altKey && bgImageActive()) drag = { mode: 'bg', x: e.clientX, y: e.clientY };
+    else drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey };
+  });
+  c.addEventListener('pointermove', (e) => {
+    if (!drag || drag.handle) return;
+    if (drag.mode === 'move') {
+      const [px, py] = framePoint(e);
+      setText(drag.id, { x: round3(clamp(drag.x + px - drag.px, -0.5, 0.5)), y: round3(clamp(drag.y - (py - drag.py), -0.5, 0.5)) });
+      return;
+    }
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (drag.mode === 'bg') {
+      const b = current.settings.background, k = 1 / canvas.clientWidth;
+      setValue('background', 'imageX', round3(clamp(b.imageX + dx * k, -1, 1)));
+      setValue('background', 'imageY', round3(clamp(b.imageY - dy * k, -1, 1)));
+      syncField('background', 'imageX'); syncField('background', 'imageY');
+      return;
+    }
+    const c = current.settings.camera;
+    if (drag.pan) {
+      const k = 1 / canvas.clientWidth;
+      setValue('camera', 'offsetX', clamp(+(c.offsetX + dx * k).toFixed(3), -0.5, 0.5));
+      setValue('camera', 'offsetY', clamp(+(c.offsetY - dy * k).toFixed(3), -0.5, 0.5));
+      syncField('camera', 'offsetX'); syncField('camera', 'offsetY');
+    } else {
+      setValue('camera', 'yaw', wrap180(c.yaw - dx * 0.5));
+      setValue('camera', 'pitch', clamp(Math.round(c.pitch + dy * 0.4), -89, 89));
+      syncField('camera', 'yaw'); syncField('camera', 'pitch');
+    }
+  });
+  c.addEventListener('pointerup', () => { drag = null; });
+  c.addEventListener('contextmenu', (e) => e.preventDefault());
+  c.addEventListener('dblclick', (e) => {
+    const hit = current && hitText(previewLayouts, ...framePoint(e));
+    if (!hit) return;
     selectText(hit);
-    setText(hit, { size: clamp(Math.round(t.size * f), 4, 400), strokeWidth: Math.round(t.strokeWidth * f * 2) / 2 });
-  } else if (e.altKey && bgImageActive()) {
-    setValue('background', 'imageScale', round3(clamp(current.settings.background.imageScale * 1.1 ** steps, 0.05, 8)));
-    syncField('background', 'imageScale');
-  } else {
-    setValue('camera', 'zoom', wheelZoom(current.settings.camera.zoom, e, canvas.clientHeight));
-    syncField('camera', 'zoom');
-  }
-}, { passive: false });
+    openTextEdit(hit);
+  });
+  c.addEventListener('wheel', (e) => {
+    if (!current) return;
+    e.preventDefault();
+    const steps = -e.deltaY / (e.deltaMode === 1 ? 3 : 100), hit = !e.altKey && hitText(previewLayouts, ...framePoint(e));
+    if (hit) {
+      const t = layerOf(current, hit), f = 1.1 ** (e.ctrlKey ? steps / 5 : steps);
+      selectText(hit);
+      setText(hit, { size: clamp(Math.round(t.size * f), 4, 400), strokeWidth: Math.round(t.strokeWidth * f * 2) / 2 });
+    } else if (e.altKey && bgImageActive()) {
+      setValue('background', 'imageScale', round3(clamp(current.settings.background.imageScale * 1.1 ** steps, 0.05, 8)));
+      syncField('background', 'imageScale');
+    } else {
+      setValue('camera', 'zoom', wheelZoom(current.settings.camera.zoom, e, canvas.clientHeight));
+      syncField('camera', 'zoom');
+    }
+  }, { passive: false });
+}
+bindCanvas(canvas);
 
 // Selection handles: corners scale (size and stroke together), the top knob rotates around the anchor.
 $('textSel').addEventListener('pointerdown', (e) => {

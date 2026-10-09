@@ -44,14 +44,7 @@ export function boundsOf(points) {
 
 export class IconRenderer {
   constructor(canvas) {
-    const gl = (this.gl = new THREE.WebGLRenderer({ canvas, alpha: true, premultipliedAlpha: true, antialias: false, preserveDrawingBuffer: true }));
-    gl.setPixelRatio(1);
-    gl.shadowMap.enabled = true;
-    gl.shadowMap.type = THREE.PCFShadowMap;
-    gl.toneMapping = THREE.NoToneMapping;
-    gl.setClearColor(0x000000, 0);
-    this.env = new THREE.PMREMGenerator(gl).fromScene(new RoomEnvironment(), 0.04).texture;
-    this.targets = {};
+    this.attach(canvas);
     this.mats = {};
     this.black = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1);
     this.black.needsUpdate = true;
@@ -77,6 +70,37 @@ export class IconRenderer {
     this.ground.layers.set(LAYER.GROUND);
     this.rig = [this.hemi, this.key, this.key.target, this.fill, this.fill.target, this.rim, this.rim.target, this.ground];
     for (const o of this.rig) { if (o.isLight) o.layers.enableAll(); this.scene.add(o); }
+  }
+
+  // Everything tied to one WebGL context: the renderer, its PMREM environments and render targets. Scenes, materials and
+  // the files' textures/meshes are context-free and upload again on their own.
+  attach(canvas) {
+    this.canvas = canvas;
+    const gl = (this.gl = new THREE.WebGLRenderer({ canvas, alpha: true, premultipliedAlpha: true, antialias: false, preserveDrawingBuffer: true }));
+    gl.setPixelRatio(1);
+    gl.shadowMap.enabled = true;
+    gl.shadowMap.type = THREE.PCFShadowMap;
+    gl.toneMapping = THREE.NoToneMapping;
+    gl.setClearColor(0x000000, 0);
+    this.env = new THREE.PMREMGenerator(gl).fromScene(new RoomEnvironment(), 0.04).texture;
+    this.skyEnv = null;
+    if (this.skyFaces) this.setSky(this.skyFaces);
+    this.targets = {};
+    canvas.addEventListener('webglcontextlost', () => { this.onLost?.(); this.recover(); });
+  }
+
+  // GPU reset (out of video memory, driver crash): Chromium rarely restores the old context, so build a fresh one on a
+  // clone of the canvas swapped into the page, retrying while the GPU process restarts. onRestore(canvas) lets the app
+  // re-attach input handlers. Until then render() throws instead of returning blank images.
+  recover(delay = 1000) {
+    clearTimeout(this.recoverTimer);
+    this.recoverTimer = setTimeout(() => {
+      const old = this.canvas, fresh = old.cloneNode(false);
+      try { this.gl.dispose(); } catch { /* already gone */ }
+      old.replaceWith(fresh);
+      try { this.attach(fresh); } catch { this.canvas = fresh; this.recover(Math.min(delay * 2, 16000)); return; }
+      this.onRestore?.(fresh);
+    }, delay);
   }
 
   rt(name, w, h, { type = THREE.HalfFloatType, samples = 0, depth = false, filter = THREE.LinearFilter } = {}) {
@@ -182,7 +206,10 @@ export class IconRenderer {
     const sc = this.scene;
     for (const child of [...sc.children]) if (!this.rig.includes(child)) sc.remove(child);
     sc.add(job.root);
-    if (job.vfxGroup && s.vfx.enabled) sc.add(job.vfxGroup);
+    if (job.vfxGroup && s.vfx.enabled) {
+      sc.add(job.vfxGroup);
+      job.vfxGroup.traverse((o) => o.userData.sortFor?.(frame.cam));
+    }
     if (job.trailGroup && s.trails.enabled && s.trails.length > 0) sc.add(job.trailGroup);
     if (job.hlGroup) sc.add(job.hlGroup);
     sc.environment = s.lighting.robloxSky && this.skyEnv ? this.skyEnv : this.env;
@@ -271,6 +298,7 @@ export class IconRenderer {
   // size: output px (the long side). out: 'screen' or 'pixels'. Returns ImageData for 'pixels', cropped to aspect.
   render(job, s, size, { out = 'screen', supersample = 1, fit = null, aspect = 1 } = {}) {
     const gl = this.gl;
+    this.checkContext();
     const W = Math.round(size * supersample), px = W / 512;
     const frame = this.setupCamera(job, s, fit, aspect);
     const cam = frame.cam;
@@ -369,6 +397,7 @@ export class IconRenderer {
     const [cw, ch] = cropOf(aspect), w = Math.round(size * cw), h = Math.round(size * ch), x0 = (size - w) >> 1, y0 = (size - h) >> 1;
     const buf = new Uint8Array(w * h * 4);
     gl.readRenderTargetPixels(outRT, x0, y0, w, h, buf);
+    this.checkContext(); // lost mid-render: the pixels read back are all zero
     const img = new ImageData(w, h), row = w * 4;
     for (let y = 0; y < h; y++) img.data.set(buf.subarray((h - 1 - y) * row, (h - y) * row), y * row);
     return img;
@@ -376,7 +405,12 @@ export class IconRenderer {
 
   // Roblox's default sky (six DDS faces in the local install) as the reflection/lighting environment.
   // faces: canvases in three's cube order (+x, -x, +y, -y, +z, -z).
+  checkContext() {
+    if (this.gl.getContext()?.isContextLost?.() !== false) throw new Error('The GPU was reset (out of video memory or a driver crash). Waiting for it to come back; restart the app if renders stay blank.');
+  }
+
   setSky(faces) {
+    this.skyFaces = faces;
     const cube = new THREE.CubeTexture(faces);
     cube.colorSpace = THREE.SRGBColorSpace;
     cube.needsUpdate = true;

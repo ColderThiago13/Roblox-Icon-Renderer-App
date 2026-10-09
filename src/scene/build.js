@@ -298,12 +298,13 @@ async function applySurfaceAppearance(material, sa, partCol, warn) {
   if (maps.color) {
     try {
       const overlay = (p.alphamode ?? 0) === 0;
-      material.map = overlay ? await loadOverlayTexture(maps.color, partCol) : await loadAlphaTexture(maps.color);
+      // Overlay: Color tints the ColorMap only, so it is baked into the texture and the part color shows through untinted.
+      material.map = overlay ? await loadOverlayTexture(maps.color, partCol, tint) : await loadAlphaTexture(maps.color);
       // Cutouts (leaf/hair cards) stay opaque with depth so overlapping cards sort per pixel; the MSAA scene target turns
       // alpha into coverage for soft edges. Blending them can't sort cards within one mesh.
       if (material.map.userData.cutout) { material.alphaTest = 0.5; material.alphaToCoverage = true; }
       else if (!overlay) { material.transparent = true; material.alphaTest = 0.02; }
-      material.color.copy(tint);
+      if (overlay) material.color.setScalar(1); else material.color.copy(tint);
     } catch (e) { warn(e.message); }
   }
   await Promise.all([
@@ -313,8 +314,10 @@ async function applySurfaceAppearance(material, sa, partCol, warn) {
   ]);
   if (maps.emissive && (p.emissivestrength ?? 1) > 0) {
     try {
-      material.emissiveMap = await loadEmissiveTexture(maps.emissive, maps.color);
-      material.emissive.copy(color3(p.emissivetint, 0xffffff));
+      // Roblox multiplies the glow by the albedo (ColorMap, Overlay part color, and the Color tint), so a tinted
+      // surface glows in its own color mixed with EmissiveTint instead of plain EmissiveTint.
+      material.emissiveMap = await loadEmissiveTexture(maps.emissive, material.map?.image);
+      material.emissive.copy(color3(p.emissivetint, 0xffffff)).multiply(material.color);
       material.userData.emissiveStrength = p.emissivestrength ?? 1; // intensity set per render with the neon setting
     } catch (e) { warn(e.message); }
   }
