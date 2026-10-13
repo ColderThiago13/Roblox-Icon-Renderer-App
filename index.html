@@ -37,15 +37,19 @@
     <button id="addBtn" class="primary">Add files</button>
     <input id="fileInput" type="file" multiple accept=".rbxm,.rbxmx,.obj" hidden>
     <button id="addIdBtn" title="Download a model, accessory, gear or mesh from Roblox by its asset ID or catalog link"><i class="uiIco ui-cloud"></i> ID</button>
+    <button id="avatarBtn" title="Add a Roblox user's avatar (R15 or R6) by username or user ID">Avatar</button>
+    <button id="watchBtn" title="Open every model in a folder and re-render each one whenever it changes on disk">Watch…</button>
     <span class="sep"></span>
-    <label title="Export size in pixels (the long side for non-square shapes)">Size <select id="expSize"><option>256</option><option selected>512</option><option>1024</option><option>1920</option><option>2048</option><option>4096</option></select></label>
+    <label title="Export size in pixels (the long side for non-square shapes)">Size <select id="expSize"><option>128</option><option>256</option><option selected>512</option><option>1024</option><option>1920</option><option>2048</option><option>4096</option></select></label>
     <label title="Shape of exported images and videos; the preview darkens what is cropped away">Shape <select id="expAspect"><option value="1">1:1</option><option value="1.7778">16:9</option><option value="0.5625">9:16</option><option value="1.3333">4:3</option><option value="0.75">3:4</option><option value="2">2:1</option></select></label>
     <label>Format <select id="expFormat"><option value="png">PNG</option><option value="webp">WebP</option><option value="jpeg">JPEG</option></select></label>
     <label>Quality <select id="expSS"><option value="1">1x</option><option value="2" selected>2x SSAA</option></select></label>
+    <label title="Roblox export targets: size, shape, format and the preview's safe-area mask">Preset <select id="expPreset"><option value="">Custom</option></select></label>
+    <button id="expOptsBtn" title="Export options: file name template, trimming, extra sizes">Options…</button>
     <button id="exportOne">Export current…</button>
     <button id="exportSel">Export checked…</button>
     <button id="exportAll">Export all…</button>
-    <button id="exportAnim" title="Export a PNG sequence, sprite sheet or GIF over time">Export animation…</button>
+    <button id="exportAnim" title="Export a PNG sequence, sprite sheet, GIF, APNG, animated WebP or video over time">Export animation…</button>
     <span class="sep"></span>
     <span class="grow"></span>
     <span id="status"></span>
@@ -60,24 +64,27 @@
     <aside id="files">
       <div class="files-head">
         <label title="Edits apply to every checked file"><input type="checkbox" id="linkEdits"> Edit checked together</label>
-        <span class="files-actions"><button id="checkAll" class="link">all</button>/<button id="checkNone" class="link">none</button></span>
+        <span class="files-actions"><button id="checkAll" class="link">all</button>/<button id="checkNone" class="link">none</button> · <button id="combineBtn" class="link" title="Put the checked files' models into one scene (a bundle showcase)">combine</button></span>
       </div>
       <ul id="fileList"></ul>
       <div id="emptyHint" class="hint">Drop <b>.rbxm</b>, <b>.rbxmx</b> or <b>.obj</b> files anywhere</div>
       <div id="workspace">
         <div class="files-head"><span>Workspace</span><span class="ws-tip" title="Click, Ctrl+click or Shift+click to select; drag onto the file list to make each one its own icon">drag models to Files ↑</span></div>
+        <div id="sceneBar" hidden><span class="muted">Scene layout</span> <select id="sceneLayout"></select> <label class="muted" title="Space between models, as a fraction of their average width">gap <input id="sceneGap" type="number" min="0" max="3" step="0.05"></label></div>
         <ul id="wsTree"></ul>
       </div>
     </aside>
 
     <section id="stage">
-      <div id="viewport" class="bg-checker"><canvas id="view"></canvas><div id="aspectMask" hidden></div><div id="textSel" hidden><i data-h="scale" class="nw"></i><i data-h="scale" class="ne"></i><i data-h="scale" class="sw"></i><i data-h="scale" class="se"></i><i data-h="rotate" class="rot" title="Rotate (Shift snaps)"></i><i data-h="sx" class="e" title="Stretch width"></i><i data-h="sx" class="w" title="Stretch width"></i><i data-h="sy" class="n" title="Stretch height"></i><i data-h="sy" class="s" title="Stretch height"></i></div><textarea id="textEdit" hidden spellcheck="false" rows="1"></textarea></div>
+      <div id="viewport" class="bg-checker"><canvas id="view"></canvas><canvas id="beforeView" hidden></canvas><div id="splitHandle" hidden><span>Before</span><span>After</span></div><div id="aspectMask" hidden></div><div id="maskOverlay" hidden></div><div id="textSel" hidden><i data-h="scale" class="nw"></i><i data-h="scale" class="ne"></i><i data-h="scale" class="sw"></i><i data-h="scale" class="se"></i><i data-h="rotate" class="rot" title="Rotate (Shift snaps)"></i><i data-h="sx" class="e" title="Stretch width"></i><i data-h="sx" class="w" title="Stretch width"></i><i data-h="sy" class="n" title="Stretch height"></i><i data-h="sy" class="s" title="Stretch height"></i></div><textarea id="textEdit" hidden spellcheck="false" rows="1"></textarea></div>
       <div id="timeline" hidden>
         <button id="playBtn" class="chip" title="Play / pause VFX (Space)">▶</button>
         <button id="restartBtn" class="chip" title="Back to start">⏮</button>
-        <input id="timeSlider" type="range" min="0" max="5" step="0.01" value="2" title="Time since the VFX started">
+        <div id="timeWrap"><input id="timeSlider" type="range" min="0" max="5" step="0.01" value="2" title="Timeline: VFX time, motion, pattern spin and camera keys"><div id="keyMarks"></div></div>
         <span id="timeLabel">2.00 s</span>
         <label class="muted">of <input id="timeMax" type="number" min="0.5" max="60" step="0.5" value="5"> s</label>
+        <button id="keyBtn" class="chip" title="Camera key at this time: the camera eases between keys during playback and animated export (right-click a ◆ to delete it)">◆ Key</button>
+        <button id="keyClear" class="chip" hidden title="Remove all camera keys">✕ keys</button>
         <label class="muted" title="Playback speed"><select id="playSpeed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label>
       </div>
       <div id="animbar" hidden>
@@ -95,6 +102,8 @@
         <button data-bg="white" class="chip">White</button>
         <button data-bg="black" class="chip">Black</button>
         <span class="grow"></span>
+        <label class="muted" title="Safe-area preview for icons Roblox crops (badges and game passes are circles)">Mask <select id="maskSel"><option value="none">None</option><option value="circle">Circle</option><option value="rounded">Rounded</option></select></label>
+        <button id="compareBtn" class="chip" title="Before / after: the left side shows the render without post-processing; drag the line">Compare</button>
         <span class="tip">Drag: rotate · Right-drag: move · Wheel: zoom (Ctrl: fine) · Alt: background image</span>
         <button id="viewBtn" title="Camera angle presets"><i class="uiIco ui-camera"></i> View ▾</button>
         <button id="reloadBtn" title="Re-download assets and rebuild">Reload file</button>
@@ -116,6 +125,14 @@
           <button id="applyAllBtn" title="Apply all current settings to every file">To all files</button>
           <button id="resetBtn" title="Back to default settings">Reset</button>
           <button id="defaultBtn" title="New files start with the current settings">Default</button>
+        </div>
+        <div class="ph-row" id="lookRow">
+          <button id="randomBtn" title="A random look: lighting, background, outline, glow and rim">🎲 Surprise me</button>
+          <button id="pinBtn" title="Keep the current settings as look A to compare against">Pin A</button>
+          <button id="swapBtn" title="Swap the current settings with the pinned look" disabled>Swap A/B</button>
+        </div>
+        <div class="ph-row">
+          <input id="panelSearch" type="search" placeholder="Search settings… (Ctrl+F)" autocomplete="off" spellcheck="false" title="Show only the settings whose names match">
         </div>
       </div>
       <div id="sections"></div>
@@ -167,7 +184,7 @@
       <h2>Export animation</h2>
       <div class="grid2">
         <label>Files <select id="axScope"><option value="current">Current file</option><option value="checked">Checked files</option><option value="all">All files</option></select></label>
-        <label>Format <select id="axFormat"><option value="png">PNG sequence</option><option value="sheet">PNG sprite sheet + JSON</option><option value="gif">GIF</option><option value="mp4">MP4 video (H.264)</option><option value="webm">WebM video (VP9)</option></select></label>
+        <label>Format <select id="axFormat"><option value="png">PNG sequence</option><option value="sheet">PNG sprite sheet + JSON</option><option value="gif">GIF</option><option value="mp4">MP4 video (H.264)</option><option value="webm">WebM video (VP9)</option><option value="apng">APNG (animated PNG)</option><option value="awebp">Animated WebP</option></select></label>
         <label>Time source <select id="axSource" title="The rig animation and the VFX have separate clocks; choose which advance"><option value="both">Animation + VFX</option><option value="animation">Animation only</option><option value="vfx">VFX only</option></select></label>
         <label class="sheetOnly">Size by <select id="axSizeBy" title="Frame: each frame has a fixed size and the sheet grows with the frame count. Whole sheet: the sheet has a fixed size and frames shrink to fit."><option value="frame">Frame size</option><option value="sheet">Whole sheet</option></select></label>
         <label class="sheetOnly bySheet">Sheet size (px) <select id="axSheetSize"><option>1024</option><option>2048</option><option selected>4096</option><option>8192</option><option>16384</option></select></label>
@@ -178,15 +195,40 @@
         <label class="inline"><input id="axLoop" type="checkbox" checked> Loop (skip the duplicate last frame)</label>
         <label class="inline"><input id="axLock" type="checkbox" checked> Lock framing across the clip</label>
         <label class="inline" title="The camera circles the model once over the clip, starting from the current angle"><input id="axTurn" type="checkbox"> Turntable (360° camera orbit)</label>
+        <label title="Averages several moments inside each frame's shutter, so fast motion streaks">Motion blur <select id="axBlur"><option value="0">Off</option><option value="4">4 samples</option><option value="8">8 samples</option><option value="16">16 samples</option></select></label>
+        <label title="How much of the time between frames the shutter stays open">Shutter (frames) <input id="axShutter" type="number" min="0.05" max="1" step="0.05" value="0.5"></label>
         <label class="sheetOnly">Sheet columns (0 = auto) <input id="axCols" type="number" min="0" max="64" step="1" value="0"></label>
         <label class="sheetOnly">Padding (px) <input id="axPad" type="number" min="0" max="64" step="1" value="0"></label>
         <label class="bgSel">Background <select id="axGifBg"><option value="transparent">Transparent</option><option value="solid">Solid color</option></select></label>
         <label class="bgColor">Background color <input id="axGifColor" type="color" value="#2b2d42"></label>
       </div>
       <p id="axSheetInfo" class="sheetOnly"></p>
-      <p class="muted">Quality and shape come from the toolbar (sprite sheets keep square frames). GIFs are limited to 256 colors, 1-bit transparency and 1024 px. MP4 has no transparency; transparent WebM keeps it (Chrome, editors that read VP9 alpha).</p>
+      <p class="muted">Quality and shape come from the toolbar (sprite sheets keep square frames). GIFs are limited to 256 colors, 1-bit transparency and 1024 px; APNG and animated WebP keep full color and smooth transparency. MP4 has no transparency; transparent WebM keeps it (Chrome, editors that read VP9 alpha). Camera keys on the timeline are followed.</p>
       <div id="axProgressRow" hidden><progress id="axProgress" max="1" value="0"></progress> <span id="axProgressLabel"></span></div>
       <div class="row"><span class="grow"></span><button id="axCancel" type="button">Close</button><button id="axGo" class="primary" type="button">Export…</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="expOptsDlg">
+    <form method="dialog">
+      <h2>Export options</h2>
+      <label>File name template <input id="expTemplate" type="text" autocomplete="off" placeholder="{name}"></label>
+      <p class="muted">Tokens: <code>{name}</code> <code>{size}</code> <code>{w}</code> <code>{h}</code> <code>{format}</code> <code>{profile}</code> <code>{preset}</code> <code>{index}</code> <code>{date}</code>. Used for image and animation exports; extra sizes add <code>_{size}</code> when the template has none.</p>
+      <label class="inline"><input id="expTrim" type="checkbox"> Trim transparent padding (images)</label>
+      <label>Margin after trimming (px) <input id="expMargin" type="number" min="0" max="512" step="1" value="0"></label>
+      <div class="muted">Also export these sizes</div>
+      <div id="expSizes" class="sizeRow"></div>
+      <div class="row"><span class="grow"></span><button value="ok" class="primary">Done</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="avatarDlg">
+    <form method="dialog">
+      <h2>Add an avatar</h2>
+      <label>Roblox username or user ID <input id="avatarInput" type="text" autocomplete="off" placeholder="e.g. Builderman or 156"></label>
+      <label>Rig <select id="avatarRig"><option value="auto">The user's own setting</option><option value="R15">R15</option><option value="R6">R6</option></select></label>
+      <p class="muted">Builds the avatar with body colors, shirt, pants, T-shirt, face, head, accessories and body package meshes. R15 also takes dynamic heads and needs Roblox Studio or the player installed (for the default rig). Layered clothing and body scaling aren't reproduced. Asset files download with your Roblox access settings.</p>
+      <div class="row"><span class="grow"></span><button value="cancel" formnovalidate>Cancel</button><button value="add" class="primary" id="avatarOk">Add</button></div>
     </form>
   </dialog>
 

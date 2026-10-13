@@ -189,11 +189,11 @@ export function loadFamily(family) {
   return families.get(family);
 }
 
-// Resolves once the settings' background image and fonts are usable (null when they already are).
+// Resolves once the settings' background image, LUT and fonts are usable (null when they already are).
 export function overlayPending(s) {
   const waits = [];
   const b = s.background;
-  if (b.mode === 'image' && b.image && !imageFor(b.image) && !images.get(b.image).failed) waits.push(images.get(b.image).ready);
+  for (const url of [b.mode === 'image' && b.image, s.lut?.strength > 0 && s.lut.image]) if (url && !imageFor(url) && !images.get(url).failed) waits.push(images.get(url).ready);
   for (const t of s.texts ?? []) if (!fontsReady.has(t.font)) waits.push(loadFamily(t.font));
   return waits.length ? Promise.all(waits) : null;
 }

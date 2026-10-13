@@ -42,6 +42,10 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 
 **Add by ID** (toolbar): paste asset IDs or catalog links (several at once become separate files). Models, accessories and gear download as they are; a bare mesh becomes a MeshPart sized to it.
 
+**Avatar** (toolbar): enter a Roblox username or user ID to add that user's avatar as an **R15** or **R6** character (or whichever the user picked on Roblox): body colors, shirt, pants, T-shirt, face, head, accessories (placed on the matching body attachments, so they follow animations) and body package meshes. R15 starts from Roblox's default rig in your local install, wears each body package's artist-intended parts (a Korblox leg is one peg) and the avatar's width, height, depth and head scales. Clothing goes on like Roblox does it: composited through Roblox's own layouts (R15 per-limb atlases, the classic R6 atlas for packages), with package textures over it. Head items like Headless and dynamic heads work on both rigs. The avatar comes with its animations in the animation menu: R15 avatars get the player's animation packs (idle, walk, run, jump, fall, climb, swim) on top of Roblox's defaults and emotes, R6 avatars get the default R6 animations. Layered clothing isn't reproduced; a warning lists it.
+
+**Watch…** (toolbar): pick a folder; every `.rbxm`, `.rbxmx` and `.obj` in it opens, and saving one of them on disk re-renders it (and any models split out of it) with its settings kept. Click the button again to stop watching.
+
 ## Roblox Studio plugin
 
 The toolbar shows **Install plugin** until the plugin is installed, and **Update plugin** when a newer app version ships changes to it (also under Settings → Roblox Studio). It writes `RobloxIconRenderer.lua` to `%LOCALAPPDATA%\Roblox\Plugins`; restart Studio if it was open.
@@ -64,7 +68,7 @@ claude mcp add --scope user roblox-icon-renderer -e ELECTRON_RUN_AS_NODE=1 -- "%
 
 Then just ask, e.g. *"Import my selected models from Studio, make a 512 px icon of each with a 3/4 view, a thick black outline and a dark blue gradient background, check them, and export them to D:\Icons"*.
 
-Tools: `get_status`, `list_files`, `add_file`, `add_assets`, `remove_files`, `select_file`, `get_model_tree`, `set_parts_disabled`, `split_models`, `get_schema`, `get_settings`, `set_settings` (any render setting, text layers and camera views, checked against the schema), `set_background_image`, `list_profiles`, `apply_profile`, `save_profile`, `set_animation`, `preview` (returns the image), `export_images`, `export_animation` (PNG sequence, sprite sheet, GIF, MP4, WebM, turntable), and for Studio `studio_status`, `studio_selection`, `studio_browse`, `studio_import`.
+Tools: `get_status`, `list_files`, `add_file`, `add_assets`, `remove_files`, `select_file`, `get_model_tree`, `set_parts_disabled`, `split_models`, `get_schema`, `get_settings`, `set_settings` (any render setting, text layers and camera views, checked against the schema), `set_background_image`, `list_profiles`, `apply_profile`, `save_profile`, `set_animation`, `preview` (returns the image), `export_images`, `export_animation` (PNG sequence, sprite sheet, GIF, APNG, animated WebP, MP4, WebM, turntable, motion blur), `add_avatar`, `combine_files`, `set_hdri`, `set_lut`, and for Studio `studio_status`, `studio_selection`, `studio_browse`, `studio_import`.
 
 **Studio:** the plugin (version 2 and up) has an **Agent Link** button, on by default, so agents can browse the open place, read the selection and import instances (each as its own file). Turn it off to keep agents out of Studio.
 
@@ -122,9 +126,18 @@ Everything stays on this computer: the app's API listens only on `127.0.0.1` and
 - Lighting: tone mapping (Neutral, ACES, AgX), key/fill/rim lights, ambient, environment reflections, self shadows, ground shadow. Both off by default: **Preset** (Studio, Future, ShadowMap, Voxel, Showcase, Dramatic) writes a starting set of lighting and shadow values you can keep editing, and **Roblox sky reflections** lights and reflects with Roblox's default sky from your local install.
 - Bloom with threshold, strength and radius. Brightness, contrast, saturation, hue, gamma, temperature.
 - Color overlay: solid, gradient or rainbow, with normal, multiply, screen, overlay or tint blending.
-- Silhouette effects from a GPU distance field: outline, outer glow, drop shadow.
-- Stylize: sharpen, chromatic aberration, posterize, grain, vignette, and pixelate (level N = (N+1)-px blocks at 512, applied last so outline/glow/shadow are pixelated too; 0 = off).
-- Background: transparent, solid, linear/radial gradient, or **an image** (Choose… in the Background section, or drop an image on the preview). Fit (cover, contain, stretch, tile), scale, offset and rotation; Alt+drag moves it and Alt+wheel scales it on the preview. The image is stored with the settings, so profiles and copied settings carry it.
+- **HDRI environment** (Lighting): light and reflect the model with an `.hdr`, `.exr` or equirectangular image (Choose…, or drop an `.hdr`/`.exr` on the preview), with a rotation slider. HDRIs are copied into the app's library (`%APPDATA%\roblox-icon-renderer\hdri`) and settings keep only their name.
+- **Ambient occlusion** (contact shadows in creases), **toon shading** (direct light in 2–8 bands), **inner edge lines** (creases and depth steps inside the model, from a normal/depth pass) and **rim glow** (a colored fresnel edge on the model).
+- **Lens flare & streaks**: anamorphic streaks, ghosts and a halo from the bright parts of the image.
+- **LUT color grade**: a `.cube` file or a PNG LUT (a strip like 1024×32 or tiles like 512×512), with a strength slider; drop a `.cube` on the preview to use it.
+- Silhouette effects from a GPU distance field: outline, **any number of extra strokes** stacked outward (Extra strokes → + Add stroke; reorder or delete each), outer glow, drop shadow, **inner shadow**, **bevel**, and **light rays** (a glowing source behind the model, blocked by it).
+- **Depth of field** (focus from the nearest to the farthest part of the model) and **tilt-shift** (a sharp band at any angle). **Blur** softens the model, the background, or both.
+- Stylize: sharpen, chromatic aberration, posterize, grain, vignette, and pixelate (level N = (N+1)-px blocks at 512, applied last so outline/glow/shadow are pixelated too; 0 = off). **Halftone** (color dots, mono ink or CMYK screens), **dithering** (Bayer 4×4/8×8 to N levels or the 1-bit, Game Boy, PICO-8, CGA and sepia palettes; pairs with pixelate) and **Retro**: scanlines, CRT curvature, RGB mask, VHS wobble/color bleed and noise lines.
+- Background: transparent, solid, linear/radial gradient, **sunburst, stripes, dots or stars** (count, scale, and a spin that runs on the timeline), or **an image** (Choose… in the Background section, or drop an image on the preview). Fit (cover, contain, stretch, tile), scale, offset and rotation; Alt+drag moves it and Alt+wheel scales it on the preview. The image is stored with the settings, so profiles and copied settings carry it.
+- **Rarity frame**: Common, Uncommon, Rare, Epic, Legendary or Mythic (or custom colors) border with glow and shine, rounded, circle or square, drawn inside the export shape.
+- **Pedestal** under the model (disc, podium, platform, grass block, hexagon) and a **reflection floor** that fades out below it. The outline and glow follow the model alone unless **Outline/glow includes pedestal** is on.
+- **Motion** (no rig needed): float, bounce (with squash), wobble, spin or pulse on the timeline clock, for animated item icons. The camera frames the whole motion, so the model moves inside a steady frame.
+- **Compare** (under the preview): the left side of the line shows the render without post-processing; drag the line. **Pin A / Swap A/B** (settings panel) keeps a look to flip back and forth with, and **🎲 Surprise me** picks a random tasteful look (Ctrl+Z goes back).
 
 **Text**
 - **Double-click a text on the preview to type right on it** (Enter or clicking away finishes, Shift+Enter adds a line). Side handles stretch the width or height alone; corner handles scale the whole text.
@@ -146,6 +159,11 @@ Everything stays on this computer: the app's API listens only on `127.0.0.1` and
   ![Export animation: MP4/WebM video formats and the turntable option](docs/feature-video-export.png)
 
 - **Turntable**: the camera circles the model once over the clip (any format), with framing held steady for every angle.
+- **APNG** and **animated WebP** export: full color and smooth transparency, exact frame timing. **Motion blur** (4, 8 or 16 sub-frames over an adjustable shutter) for any format.
+- **Camera keys**: the timeline is always shown; set the time and the camera, press **◆ Key**, repeat. The camera eases between keys while scrubbing, playing and in animated exports (dolly, zoom, swing…). Click a ◆ to jump to it, right-click to delete it.
+- **Export presets** (toolbar): game icon, game thumbnail 1920×1080, badge, game pass, developer product, group icon and Discord emoji set the size, shape and format, and the preview's **Mask** shows the circle or rounded safe area Roblox crops to.
+- **Options…** (toolbar): a file name template (`{name}`, `{size}`, `{w}`, `{h}`, `{format}`, `{profile}`, `{preset}`, `{index}`, `{date}`), **trim** transparent padding with a margin, and **extra sizes** exported in the same go.
+- **Combine** (file list): the checked files' models go into one new scene, side by side; the Workspace header switches its layout (row, arc with the middle one in front, grid) and the gap. Scenes are self-contained files, so they reopen with the session.
 
 ## Known limitations
 
@@ -155,6 +173,8 @@ Everything stays on this computer: the app's API listens only on `127.0.0.1` and
 - Plastic, SmoothPlastic, Neon, ForceField and Glass keep a flat look (Roblox builds those into the client). All base materials tile at one size (8 studs); Roblox doesn't publish per-material tile sizes.
 - MaterialVariants are only found when they're saved in the same file. Union shapes need the baked mesh Roblox saves with them; very old unions without one still render as their bounding box.
 - Highlight `DepthMode = Occluded` is drawn as AlwaysOnTop.
+- Avatars: layered clothing, Rthro proportion / body-type blending and dynamic head moods (facial expressions) aren't reproduced.
+- Ambient occlusion, edge lines and rim glow use the model only (VFX in front of the model still get its occlusion), and the reflection floor isn't included in the camera framing.
 
 ## References
 

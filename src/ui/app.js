@@ -1,13 +1,17 @@
-import { IconRenderer, cropOf } from '../render/renderer.js';
+import { IconRenderer, cropOf, equirectTexture } from '../render/renderer.js';
 import { createJob, updateVfx, updateTrails, setPose, disposeJob } from '../scene/job.js';
 import { wheelZoom } from './zoom.js';
 import { loadAnimationId } from '../scene/anim.js';
 import { assetId, nameOf, pathOf, atPath } from '../rbx/instance.js';
 import { clearMemoryCache, getAssetBytes, loadImage, loadMesh } from '../scene/assets.js';
-import { SCHEMA, TEXT_FIELDS, textLayer, defaultSettings, withDefaults, clone, hexToVec3, PREFS, prefsWithDefaults, LIGHTING_PRESETS } from '../settings.js';
+import { SCHEMA, TEXT_FIELDS, textLayer, defaultSettings, withDefaults, clone, hexToVec3, PREFS, prefsWithDefaults, LIGHTING_PRESETS,
+  STROKE_FIELDS, strokeLayer, cameraAt, withoutPost, randomLook, patchSettings } from '../settings.js';
 import { hitText, fontFamilies, loadFamily, overlayPending, overlayReady, fontString } from '../render/overlay.js';
 import { createAgent } from './agent.js';
-import { frameTimes, gifDelays, sheetLayout, flatten, opaqueSamples, MAX_GIF_SIZE, MAX_SHEET, frameSizeForSheet, spinFit } from './animexport.js';
+import { frameTimes, gifDelays, sheetLayout, flatten, opaqueSamples, MAX_GIF_SIZE, MAX_SHEET, frameSizeForSheet, spinFit,
+  accumulate, resolveAccumulated, assembleApng, assembleWebp, trimImage, fileNameFrom, EXPORT_PRESETS } from './animexport.js';
+import { parseCube, cubeToStrip, imageToStrip } from '../render/lut.js';
+import { sceneFile, SCENE_LAYOUTS } from '../scene/composite.js';
 
 const $ = (id) => document.getElementById(id);
 let canvas = $('view'); // replaced after a GPU reset
@@ -37,7 +41,7 @@ function newFile(props) {
 async function addFiles(list) {
   for (const f of list) {
     if (!/\.(rbxmx?|obj)$/i.test(f.name)) { status(`Skipped ${f.name}: unsupported type`); continue; }
-    addBytes(f.name, new Uint8Array(await f.arrayBuffer()));
+    addBytes(f.name, new Uint8Array(await f.arrayBuffer()), { diskPath: window.native.pathForFile(f) });
   }
 }
 
@@ -77,6 +81,7 @@ function select(file) {
   closeTextEdit();
   current = file;
   selectedText = null;
+  $('swapBtn').disabled = !file?.pinned;
   setPlaying(false); setAnimPlaying(false);
   renderList(); buildPanel(); renderWarnings(); syncTimeline(); syncAnimBar(); requestPreview(); renderWorkspace();
 }
@@ -136,6 +141,7 @@ const ws = { file: null, full: null, roots: null, open: null, sel: new Set(), an
 const keyPath = (key) => key.split('/').map(Number);
 const instAt = (key) => atPath(ws.full, keyPath(key));
 function renderWorkspace() {
+  syncSceneBar();
   const ul = $('wsTree'), job = current?.job;
   if (ws.file !== current) Object.assign(ws, { file: current, full: null, roots: null, open: null, sel: new Set(), anchor: null });
   if (job?.treeRoots) Object.assign(ws, { full: job.tree.roots, roots: job.treeRoots });
@@ -244,7 +250,7 @@ function splitOut(keys, src = current) {
   const roots = src?.job?.tree?.roots;
   if (!roots || !keys.length) return [];
   const made = keys.map((key) => {
-    const f = newFile({ name: nameOf(atPath(roots, keyPath(key))), bytes: src.bytes, src: src.src, path: keyPath(key), disabled: src.disabled.filter((k) => k.startsWith(key + '/')), settings: clone(src.settings), checked: src.checked });
+    const f = newFile({ name: nameOf(atPath(roots, keyPath(key))), bytes: src.bytes, src: src.src, diskPath: src.diskPath, path: keyPath(key), disabled: src.disabled.filter((k) => k.startsWith(key + '/')), settings: clone(src.settings), checked: src.checked });
     load(f);
     return f;
   });
@@ -343,7 +349,8 @@ $('setReset').onclick = () => {
 // Open files and their edits are saved every few seconds and on close, then reopened on the next launch.
 function sessionJson() {
   return JSON.stringify({ current: files.indexOf(current), linkEdits: $('linkEdits').checked,
-    files: files.map((f) => ({ name: f.name, src: f.src, path: f.path, disabled: f.disabled, settings: f.settings, animSel: f.animSel, animTime: f.animTime, checked: f.checked, studioKey: f.studioKey })) });
+    watchFolder,
+    files: files.map((f) => ({ name: f.name, src: f.src, path: f.path, disabled: f.disabled, settings: f.settings, animSel: f.animSel, animTime: f.animTime, checked: f.checked, studioKey: f.studioKey, diskPath: f.diskPath, profile: f.profile })) });
 }
 let savedSession = null; // null until the previous session is restored, so an early save can't wipe it
 function saveSession() {
@@ -359,6 +366,7 @@ async function restoreSession() {
     const s = prefs.restoreSession ? await window.native.getSession() : null;
     for (const f of s?.files ?? []) if (s.blobs[f.src]) newFile({ ...f, bytes: s.blobs[f.src], settings: withDefaults(f.settings) });
     if (s) $('linkEdits').checked = !!s.linkEdits;
+    if (s?.watchFolder) startWatch(s.watchFolder, false);
     if (files.length) { select(files[s.current] ?? files[0]); files.forEach(load); status(`Reopened ${files.length} file${files.length > 1 ? 's' : ''} from last time`); }
   } catch (e) { console.error(e); status(`Could not reopen last session: ${e.message}`); }
   savedSession = '';
@@ -388,7 +396,19 @@ function prepare(file) {
 function draw(file, size, opts) {
   prepare(file);
   if (file.settings.lighting.robloxSky) ensureSky();
+  if (file.settings.lighting.hdri) ensureHdri(file.settings.lighting.hdri);
   return renderer.render(file.job, file.settings, size, opts);
+}
+
+// HDRIs from the app's library (userData/hdri), decoded once per name.
+const hdriLoading = new Map();
+function ensureHdri(name) {
+  if (!hdriLoading.has(name)) hdriLoading.set(name, window.native.getHdri(name).then((b) => equirectTexture(new Uint8Array(b), name)).then((tex) => {
+    renderer.setHdri(name, tex);
+    requestPreview();
+    for (const f of files) if (f.settings.lighting.hdri === name) thumb(f);
+  }, (e) => status(`Could not load the HDRI: ${e.message}`)));
+  return hdriLoading.get(name);
 }
 
 // Roblox's default sky from the local install, decoded once when a file first asks for it.
@@ -403,13 +423,42 @@ function ensureSky() {
 
 // Export shape (width / height) from the toolbar; the preview frames for it and darkens the cropped part.
 const aspectOf = () => +$('expAspect').value || 1;
-function syncAspectMask() {
-  const m = $('aspectMask'), a = aspectOf();
-  m.hidden = a === 1 || !current?.job;
-  if (m.hidden) return;
-  const vr = $('viewport').getBoundingClientRect(), cr = canvas.getBoundingClientRect(), [cw, ch] = cropOf(a);
-  Object.assign(m.style, { left: `${cr.left - vr.left + (cr.width * (1 - cw)) / 2}px`, top: `${cr.top - vr.top + (cr.height * (1 - ch)) / 2}px`, width: `${cr.width * cw}px`, height: `${cr.height * ch}px` });
+// The exported crop on the preview, in viewport px.
+function cropRect() {
+  const vr = $('viewport').getBoundingClientRect(), cr = canvas.getBoundingClientRect(), [cw, ch] = cropOf(aspectOf());
+  return { left: cr.left - vr.left + (cr.width * (1 - cw)) / 2, top: cr.top - vr.top + (cr.height * (1 - ch)) / 2, width: cr.width * cw, height: cr.height * ch };
 }
+const pxStyle = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, `${v}px`]));
+function syncAspectMask() {
+  const m = $('aspectMask'), r = cropRect(), on = !!current?.job;
+  m.hidden = aspectOf() === 1 || !on;
+  if (!m.hidden) Object.assign(m.style, pxStyle(r));
+  const mask = $('maskSel').value, mo = $('maskOverlay'), d = Math.min(r.width, r.height); // safe area: the largest centered square
+  mo.hidden = mask === 'none' || !on;
+  mo.className = mask;
+  if (!mo.hidden) Object.assign(mo.style, pxStyle({ left: r.left + (r.width - d) / 2, top: r.top + (r.height - d) / 2, width: d, height: d }));
+  $('beforeView').hidden = $('splitHandle').hidden = !(comparing && on);
+  if (!comparing || !on) return;
+  Object.assign($('beforeView').style, pxStyle(r), { clipPath: `inset(0 ${(1 - split) * 100}% 0 0)` });
+  Object.assign($('splitHandle').style, pxStyle({ left: r.left + r.width * split, top: r.top, height: r.height }));
+}
+
+// Before / after: the left part of the preview shows the same render without post-processing.
+let comparing = false, split = 0.5;
+function drawBefore() {
+  const img = draw({ ...current, settings: withoutPost(current.settings) }, canvas.width, { out: 'pixels', aspect: aspectOf() }), bv = $('beforeView');
+  if (bv.width !== img.width || bv.height !== img.height) Object.assign(bv, { width: img.width, height: img.height });
+  bv.getContext('2d').putImageData(img, 0, 0);
+}
+$('compareBtn').onclick = () => { comparing = !comparing; $('compareBtn').classList.toggle('active', comparing); requestPreview(); };
+$('splitHandle').addEventListener('pointerdown', (e) => {
+  e.target.setPointerCapture(e.pointerId);
+  const move = (ev) => { const r = cropRect(), vr = $('viewport').getBoundingClientRect(); split = clamp((ev.clientX - vr.left - r.left) / r.width, 0, 1); syncAspectMask(); };
+  e.target.onpointermove = move;
+  e.target.onpointerup = () => { e.target.onpointermove = null; };
+});
+$('maskSel').value = store.get('maskSel', 'none');
+$('maskSel').onchange = () => { store.set('maskSel', $('maskSel').value); syncAspectMask(); };
 
 let previewQueued = false;
 function requestPreview() {
@@ -425,7 +474,10 @@ function drawPreview() {
   canvas.style.width = canvas.style.height = css + 'px';
   if (canvas.width !== px) renderer.gl.setSize(px, px, false);
   if (!current?.job) { renderer.gl.setRenderTarget(null); renderer.gl.clear(); syncAspectMask(); return; }
-  try { draw(current, px, { aspect: aspectOf() }); }
+  try {
+    if (comparing) drawBefore(); // first: it renders off-screen, then the preview draws on top
+    draw(current, px, { aspect: aspectOf() });
+  }
   catch (e) { console.error(e); status('Render error: ' + e.message); }
   syncAspectMask();
   previewLayouts = renderer.layouts ?? [];
@@ -493,16 +545,40 @@ function buildPanel() {
       setValue(sec.id, fd.key, v);
       if (sec.id === 'vfx') syncTimeline();
       if (fd.type === 'image') { if (v) setValue('background', 'mode', 'image'); buildPanel(); }
+      if (fd.type === 'lut' || fd.type === 'hdri') buildPanel();
+      if (sec.id === 'motion' || sec.id === 'background') syncTimeline();
       if (fd.key === 'preset' && LIGHTING_PRESETS[v]) { // writes the preset's values, which stay editable
         for (const f of targets()) for (const [id, vals] of Object.entries(LIGHTING_PRESETS[v])) Object.assign(f.settings[id], vals);
         buildPanel();
       }
     }, `${sec.id}.${fd.key}`));
     panel.append(det);
+    if (sec.id === 'outline') panel.append(buildStrokesSection());
   }
   buildTextSection();
   syncTimeline();
 }
+
+// Settings search: sections whose title matches show whole; otherwise only their matching rows (label or options).
+// Every word must match. Closed sections show their matches without changing what's saved as open.
+function filterPanel() {
+  const words = $('panelSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean), has = (s) => words.every((w) => s.includes(w));
+  $('sections').classList.toggle('searching', words.length > 0);
+  for (const det of $('sections').children) {
+    const title = (det.querySelector('summary')?.firstChild?.textContent ?? '').toLowerCase(), whole = !words.length || has(title);
+    let any = false;
+    for (const row of det.querySelectorAll('.field')) {
+      const hit = whole || has(title + ' ' + row.textContent.toLowerCase());
+      row.classList.toggle('nomatch', !hit);
+      any ||= hit;
+    }
+    det.classList.toggle('nomatch', !whole && !any);
+  }
+}
+$('panelSearch').oninput = filterPanel;
+$('panelSearch').onkeydown = (e) => { if (e.key === 'Escape' && $('panelSearch').value) { e.stopPropagation(); $('panelSearch').value = ''; filterPanel(); } };
+new MutationObserver(filterPanel).observe($('sections'), { childList: true, subtree: true }); // rebuilt sections stay filtered
+addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') { e.preventDefault(); $('panelSearch').focus(); $('panelSearch').select(); } });
 
 // One settings row. set(value) applies it; dataKey lets viewport gestures update the row in place.
 function fieldEl(fd, value, set, dataKey = '') {
@@ -535,6 +611,17 @@ function fieldEl(fd, value, set, dataKey = '') {
     pick.onclick = async () => { const url = await pickImage(); if (url) set(url); };
     box.append(pick);
     if (value) { const rm = Object.assign(document.createElement('button'), { textContent: '✕', title: 'Remove image' }); rm.onclick = () => set(''); box.append(rm); }
+    row.append(box);
+  } else if (fd.type === 'lut' || fd.type === 'hdri') {
+    const box = Object.assign(document.createElement('span'), { className: 'imgField' });
+    if (value) box.append(Object.assign(document.createElement('span'), { className: 'muted', textContent: fd.type === 'lut' ? 'loaded' : 'set', title: value.slice(0, 40) }));
+    const pick = Object.assign(document.createElement('button'), { textContent: value ? 'Change…' : 'Choose…', title: fd.type === 'lut' ? 'A .cube file or a PNG LUT (strip or tiled square); you can also drop a .cube on the preview' : 'An equirectangular .hdr, .exr or image; you can also drop one on the preview' });
+    pick.onclick = async () => {
+      try { const v = fd.type === 'lut' ? await pickLut() : await window.native.importHdri(); if (v) set(v); }
+      catch (e) { status(`Could not load it: ${cleanError(e)}`); }
+    };
+    box.append(pick);
+    if (value) { const rm = Object.assign(document.createElement('button'), { textContent: '✕', title: 'Remove' }); rm.onclick = () => set(''); box.append(rm); }
     row.append(box);
   } else if (fd.type === 'font' || fd.type === 'weight') {
     const sel = document.createElement('select');
@@ -578,12 +665,75 @@ function pickImage() {
     input.click();
   });
 }
+const cleanError = (e) => String(e?.message ?? e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+
+// LUTs are kept inside the settings as a PNG strip (see render/lut.js), like the background image.
+function pickLut() {
+  return new Promise((resolve, reject) => {
+    const input = Object.assign(document.createElement('input'), { type: 'file', accept: '.cube,.png' });
+    input.onchange = () => (input.files[0] ? lutFromFile(input.files[0], input.files[0].name).then(resolve, reject) : resolve(null));
+    input.click();
+  });
+}
+async function lutFromFile(blob, name) {
+  let strip;
+  if (/\.cube$/i.test(name)) strip = cubeToStrip(parseCube(await blob.text()));
+  else {
+    const bmp = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' }), c = canvasOf(bmp.width, bmp.height), g = c.getContext('2d');
+    g.drawImage(bmp, 0, 0);
+    strip = imageToStrip(g.getImageData(0, 0, bmp.width, bmp.height));
+  }
+  const c = canvasOf(strip.width, strip.height);
+  c.getContext('2d').putImageData(new ImageData(strip.data, strip.width, strip.height), 0, 0);
+  return c.toDataURL('image/png');
+}
+
 // Kept inside the settings (so profiles and copied settings carry it), downscaled to at most 2048 px.
 async function imageDataUrl(file, max = 2048) {
   const bmp = await createImageBitmap(file), k = Math.min(1, max / Math.max(bmp.width, bmp.height));
   const c = canvasOf(Math.max(1, Math.round(bmp.width * k)), Math.max(1, Math.round(bmp.height * k)));
   c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
   return c.toDataURL('image/webp', 0.92);
+}
+
+// ---------------- extra strokes ----------------
+// Any number of outline strokes, stacked outward (first = innermost). Edits reach the same stroke number in linked files.
+const STROKE_COLORS = ['#ffffff', '#000000', '#ffd166', '#5b8cff'];
+function editStrokes(fn) {
+  for (const f of targets()) { fn(f.settings.strokes, f); thumb(f, 300); }
+  buildStrokesSection(); requestPreview();
+}
+function buildStrokesSection() {
+  const det = Object.assign(document.createElement('details'), { id: 'strokeSection', open: openSections.has('strokes') });
+  det.ontoggle = () => { det.open ? openSections.add('strokes') : openSections.delete('strokes'); store.set('openSections', [...openSections]); };
+  const sum = Object.assign(document.createElement('summary'), { textContent: 'Extra strokes' });
+  const apply = Object.assign(document.createElement('button'), { className: 'apply', textContent: 'Apply to all', title: 'Copy these strokes to every file' });
+  apply.onclick = (e) => {
+    e.preventDefault();
+    for (const f of files) if (f !== current) { f.settings.strokes = clone(current.settings.strokes); thumb(f, 200); }
+    status(`Strokes applied to ${files.length} files`);
+  };
+  sum.append(apply);
+  const add = Object.assign(document.createElement('button'), { className: 'primary addText', textContent: '+ Add stroke' });
+  add.onclick = () => editStrokes((list) => list.push(strokeLayer({ color: STROKE_COLORS[list.length % STROKE_COLORS.length] })));
+  det.append(sum, add);
+  (current?.settings.strokes ?? []).forEach((st, i) => {
+    const box = Object.assign(document.createElement('div'), { className: 'strokeRow' }), head = Object.assign(document.createElement('div'), { className: 'strokeHead' });
+    head.innerHTML = `<span>Stroke ${i + 1}${i === 0 ? ' (inner)' : ''}</span><button title="Move inward">▲</button><button title="Move outward">▼</button><button title="Delete">✕</button>`;
+    const [up, down, del] = head.querySelectorAll('button');
+    const swap = (j) => editStrokes((list) => { if (list[i] && list[j]) [list[i], list[j]] = [list[j], list[i]]; });
+    up.onclick = () => swap(i - 1); down.onclick = () => swap(i + 1);
+    del.onclick = () => editStrokes((list) => list.splice(i, 1));
+    box.append(head, ...STROKE_FIELDS.map((fd) => fieldEl(fd, st[fd.key], (v) => {
+      for (const f of targets()) if (f.settings.strokes[i]) { f.settings.strokes[i][fd.key] = v; thumb(f, 500); }
+      requestPreview();
+    })));
+    det.append(box);
+  });
+  det.append(Object.assign(document.createElement('p'), { className: 'hint', textContent: 'Strokes stack outward from the outline (or the model edge when the outline is off). Add as many as you like.' }));
+  const old = $('strokeSection');
+  if (old) old.replaceWith(det);
+  return det;
 }
 
 // ---------------- text layers ----------------
@@ -860,21 +1010,43 @@ for (const chip of document.querySelectorAll('[data-bg]')) chip.onclick = () => 
 let playing = false, lastTick = 0;
 function syncTimeline() {
   const v = current?.settings.vfx;
-  $('timeline').hidden = !current?.job?.vfxSystem;
+  $('timeline').hidden = !current?.job; // VFX, motion, pattern spin and camera keys all run on this clock
   if (!v) return;
+  const keys = current.settings.camKeys;
+  $('keyMarks').replaceChildren(...keys.map((k, i) => {
+    const el = Object.assign(document.createElement('i'), { title: `Camera key at ${k.t.toFixed(2)} s (click: go there, right-click: delete)` });
+    el.style.left = `${Math.min(100, (k.t / v.duration) * 100)}%`;
+    el.onclick = () => { setPlaying(false); setTime(k.t); };
+    el.oncontextmenu = (e) => { e.preventDefault(); current.settings.camKeys.splice(i, 1); syncTimeline(); checkpointSoon(); };
+    return el;
+  }));
+  $('keyClear').hidden = !keys.length;
   $('timeSlider').max = v.duration;
   $('timeMax').value = v.duration;
   $('timeSlider').value = v.time;
   $('timeLabel').textContent = `${(+v.time).toFixed(2)} s`;
   syncField('vfx', 'time'); syncField('vfx', 'duration');
 }
+const KEYED = ['yaw', 'pitch', 'roll', 'zoom', 'offsetX', 'offsetY'];
 function setTime(t) {
   if (!current) return;
   setValue('vfx', 'time', Math.round(t * 1000) / 1000);
+  for (const f of targets()) { const c = cameraAt(f.settings.camKeys, t); if (c) Object.assign(f.settings.camera, c); } // camera follows its keys
+  for (const k of KEYED) syncField('camera', k);
   syncTimeline();
 }
+$('keyBtn').onclick = () => {
+  if (!current) return;
+  const t = +current.settings.vfx.time;
+  for (const f of targets()) {
+    f.settings.camKeys = [...f.settings.camKeys.filter((k) => Math.abs(k.t - t) > 1e-3), { t, ...Object.fromEntries(KEYED.map((k) => [k, f.settings.camera[k]])) }].sort((a, b) => a.t - b.t);
+  }
+  syncTimeline();
+  status(`Camera key at ${t.toFixed(2)} s (${current.settings.camKeys.length} key${current.settings.camKeys.length > 1 ? 's' : ''}): move the time and the camera, then add another`);
+};
+$('keyClear').onclick = () => { for (const f of targets()) f.settings.camKeys = []; syncTimeline(); status('Camera keys removed'); };
 function setPlaying(on) {
-  playing = on && !!current?.job?.vfxSystem;
+  playing = on && !!current?.job;
   $('playBtn').textContent = playing ? '❚❚' : '▶';
   if (playing) { lastTick = performance.now(); requestAnimationFrame(tick); }
 }
@@ -980,12 +1152,49 @@ $('animId').onkeydown = (e) => { if (e.key === 'Enter') $('animAdd').click(); };
 
 // ---------------- export ----------------
 const EXT = { png: 'png', webp: 'webp', jpeg: 'jpg' };
-const exportOpts = () => ({ size: +$('expSize').value, format: $('expFormat').value, ss: +$('expSS').value, aspect: aspectOf() });
+// Export options dialog: file name template, trimming, extra sizes. Presets fill the toolbar for Roblox targets.
+const EXTRA_SIZES = [128, 256, 512, 1024, 2048, 4096];
+const expOpts = { template: '{name}', trim: false, margin: 0, sizes: [], ...store.get('expOpts', {}) };
+const exportOpts = () => ({ size: +$('expSize').value, format: $('expFormat').value, ss: +$('expSS').value, aspect: aspectOf(), ...expOpts });
 for (const id of ['expSize', 'expFormat', 'expSS', 'expAspect']) {
   const saved = store.get(id, null);
   if (saved != null) $(id).value = saved;
-  $(id).onchange = () => { store.set(id, $(id).value); if (id === 'expAspect') requestPreview(); };
+  $(id).onchange = () => { store.set(id, $(id).value); $('expPreset').value = ''; store.set('expPreset', ''); if (id === 'expAspect') requestPreview(); };
 }
+for (const name of Object.keys(EXPORT_PRESETS)) $('expPreset').append(new Option(name, name));
+$('expPreset').value = store.get('expPreset', '');
+$('expPreset').onchange = () => {
+  const name = $('expPreset').value, p = EXPORT_PRESETS[name];
+  store.set('expPreset', name);
+  if (!p) return;
+  Object.entries({ expSize: p.size, expAspect: p.aspect, expFormat: p.format, maskSel: p.mask }).forEach(([id, v]) => { $(id).value = String(v); store.set(id, $(id).value); });
+  requestPreview();
+  status(`Preset ${name}: ${p.size} px${p.mask !== 'none' ? `, ${p.mask} safe area shown on the preview` : ''}`);
+};
+$('expSizes').replaceChildren(...EXTRA_SIZES.map((n) => {
+  const l = document.createElement('label');
+  l.innerHTML = `<input type="checkbox" value="${n}"> ${n}`;
+  return l;
+}));
+$('expOptsBtn').onclick = () => {
+  $('expTemplate').value = expOpts.template; $('expTrim').checked = expOpts.trim; $('expMargin').value = expOpts.margin;
+  for (const cb of $('expSizes').querySelectorAll('input')) cb.checked = expOpts.sizes.includes(+cb.value);
+  $('expOptsDlg').showModal();
+};
+$('expOptsDlg').onclose = () => {
+  Object.assign(expOpts, { template: $('expTemplate').value.trim() || '{name}', trim: $('expTrim').checked, margin: clamp(Math.round(+$('expMargin').value || 0), 0, 512),
+    sizes: [...$('expSizes').querySelectorAll('input:checked')].map((cb) => +cb.value) });
+  store.set('expOpts', expOpts);
+};
+// File name (no extension) for one export from the template; extra sizes get _{size} unless the template has a size.
+function nameFor(f, o, size, index, multi) {
+  const [cw, ch] = cropOf(o.aspect ?? 1);
+  const tpl = (o.template || '{name}') + (multi && !/\{(size|w|h)\}/.test(o.template || '') ? '_{size}' : '');
+  return fileNameFrom(tpl, { name: baseName(f.name), size, w: Math.round(size * cw), h: Math.round(size * ch), format: o.format, profile: f.profile ?? '',
+    preset: $('expPreset').value, index: index + 1, date: new Date().toISOString().slice(0, 10) });
+}
+const uniqueName = (name, used) => { let out = name, n = 2; while (used.has(out)) out = `${name}_${n++}`; used.add(out); return out; };
+const exportSizes = (o) => [...new Set([o.size, ...(o.sizes ?? [])])];
 
 function canvasOf(w, h, img = null) {
   const c = Object.assign(document.createElement('canvas'), { width: w, height: h });
@@ -997,9 +1206,10 @@ async function canvasBytes(c, format = 'png') {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
-async function encode(file, { size, format, ss, aspect = 1 }) {
+async function encode(file, { size, format, ss, aspect = 1, trim = false, margin = 0 }) {
   await overlayReady(file.settings);
-  const img = draw(file, size, { out: 'pixels', supersample: ss, aspect });
+  let img = draw(file, size, { out: 'pixels', supersample: ss, aspect });
+  if (trim) { const t = trimImage(img, margin); if (t !== img) img = new ImageData(t.data, t.width, t.height); }
   let c = canvasOf(img.width, img.height, img);
   if (format === 'jpeg') {
     const flat = canvasOf(img.width, img.height), g = flat.getContext('2d');
@@ -1009,33 +1219,35 @@ async function encode(file, { size, format, ss, aspect = 1 }) {
   requestPreview();
   return canvasBytes(c, format);
 }
-const baseName = (n) => n.replace(/\.(rbxmx?|obj)$/i, ''); // split-out models have no extension and may contain dots
+const baseName = (n) => n.replace(/\.(rbxmx?|obj|avatar|scene)$/i, ''); // split-out models have no extension and may contain dots
 
 async function exportFiles(list) {
   const ready = list.filter((f) => f.job);
   if (!ready.length) return status('Nothing ready to export');
   const folder = await window.native.pickFolder();
   if (!folder) return;
-  const o = exportOpts();
+  const o = exportOpts(), sizes = exportSizes(o);
   const used = new Set();
   for (let i = 0; i < ready.length; i++) {
     const f = ready[i];
     status(`Exporting ${i + 1}/${ready.length}: ${f.name}`);
-    let name = baseName(f.name), n = 2;
-    while (used.has(name)) name = `${baseName(f.name)}_${n++}`;
-    used.add(name);
-    await window.native.writeFile(await window.native.joinPath(folder, `${name}.${EXT[o.format]}`), await encode(f, o));
+    for (const size of sizes) {
+      const name = uniqueName(nameFor(f, o, size, i, sizes.length > 1), used);
+      await window.native.writeFile(await window.native.joinPath(folder, `${name}.${EXT[o.format]}`), await encode(f, { ...o, size }));
+    }
   }
-  status(`Exported ${ready.length} icon${ready.length > 1 ? 's' : ''} to ${folder}`);
+  status(`Exported ${ready.length * sizes.length} image${ready.length * sizes.length > 1 ? 's' : ''} to ${folder}`);
 }
 
 $('exportOne').onclick = async () => {
   if (!current?.job) return status('Nothing to export');
-  const o = exportOpts();
-  const path = await window.native.pickSavePath(`${baseName(current.name)}.${EXT[o.format]}`);
+  const o = exportOpts(), sizes = exportSizes(o), multi = sizes.length > 1;
+  const path = await window.native.pickSavePath(`${nameFor(current, o, o.size, 0, false)}.${EXT[o.format]}`);
   if (!path) return;
   await window.native.writeFile(path, await encode(current, o));
-  status(`Saved ${path}`);
+  const dir = path.replace(/[^\\/]+$/, ''), stem = path.slice(dir.length).replace(/\.[^.]+$/, ''); // extra sizes go next to it
+  for (const size of sizes.slice(1)) await window.native.writeFile(await window.native.joinPath(dir, `${stem}_${size}.${EXT[o.format]}`), await encode(current, { ...o, size }));
+  status(`Saved ${path}${multi ? ` and ${sizes.length - 1} more size${sizes.length > 2 ? 's' : ''}` : ''}`);
 };
 $('exportSel').onclick = () => exportFiles(files.filter((f) => f.checked));
 $('exportAll').onclick = () => exportFiles(files);
@@ -1063,7 +1275,7 @@ function syncAnimDlg() {
 }
 for (const id of ['axStart', 'axDuration']) $(id).oninput = syncAnimDlg;
 if (store.get('ax:axSize', null) == null) $('axSize').value = $('expSize').value;
-for (const id of ['axScope', 'axFormat', 'axSizeBy', 'axSheetSize', 'axSize', 'axSource', 'axFps', 'axLoop', 'axLock', 'axTurn', 'axCols', 'axPad', 'axGifBg', 'axGifColor']) {
+for (const id of ['axScope', 'axFormat', 'axSizeBy', 'axSheetSize', 'axSize', 'axSource', 'axFps', 'axLoop', 'axLock', 'axTurn', 'axCols', 'axPad', 'axGifBg', 'axGifColor', 'axBlur', 'axShutter']) {
   const el = $(id), prop = el.type === 'checkbox' ? 'checked' : 'value', saved = store.get('ax:' + id, null);
   if (saved != null) el[prop] = saved;
   el.onchange = () => { store.set('ax:' + id, el[prop]); syncAnimDlg(); };
@@ -1091,7 +1303,8 @@ async function exportAnimation() {
   const o = { ...exportOpts(), size: +$('axSize').value, format: $('axFormat').value, source: $('axSource').value,
     fps: clamp(Math.round(+$('axFps').value || 24), 1, 60), start: Math.max(0, +$('axStart').value || 0), duration: Math.max(0.01, +$('axDuration').value || 1),
     loop: $('axLoop').checked, lock: $('axLock').checked, turntable: $('axTurn').checked, cols: Math.max(0, Math.round(+$('axCols').value || 0)), pad: Math.max(0, Math.round(+$('axPad').value || 0)),
-    gifBg: $('axGifBg').value === 'solid' ? hexToVec3($('axGifColor').value).map((v) => v * 255) : null, bgColor: hexToVec3($('axGifColor').value).map((v) => v * 255) };
+    gifBg: $('axGifBg').value === 'solid' ? hexToVec3($('axGifColor').value).map((v) => v * 255) : null, bgColor: hexToVec3($('axGifColor').value).map((v) => v * 255),
+    blur: +$('axBlur').value || 0, shutter: clamp(+$('axShutter').value || 0.5, 0.05, 1) };
   if (o.format === 'gif') o.size = Math.min(o.size, MAX_GIF_SIZE);
   if (o.format === 'sheet') ({ size: o.size, sheet: o.sheet } = sheetPlan()); // same frame count for every file
   setPlaying(false); setAnimPlaying(false);
@@ -1101,9 +1314,7 @@ async function exportAnimation() {
   const used = new Set(), notes = [];
   try {
     for (const [k, f] of list.entries()) {
-      let name = baseName(f.name), n = 2;
-      while (used.has(name)) name = `${baseName(f.name)}_${n++}`;
-      used.add(name);
+      const name = uniqueName(nameFor(f, o, o.size, k, false), used);
       const note = await exportClip(f, o, folder, name, (i, total, what) => {
         $('axProgress').value = (k + i / total) / list.length;
         $('axProgressLabel').textContent = `${list.length > 1 ? `${f.name} (${k + 1}/${list.length}) · ` : ''}${what} ${i}/${total}`;
@@ -1137,8 +1348,8 @@ function gifWorker() {
 // One file's clip. Frames stream to disk (or into the sheet / GIF encoder) instead of piling up in memory.
 // Returns a note for the status line, if any.
 async function exportClip(f, o, folder, name, progress) {
-  const yaw = f.settings.camera.yaw;
-  try { return await exportClipFrames(f, o, folder, name, progress); } finally { f.settings.camera.yaw = yaw; }
+  const camera = { ...f.settings.camera }; // turntable and camera keys move it
+  try { return await exportClipFrames(f, o, folder, name, progress); } finally { Object.assign(f.settings.camera, camera); }
 }
 
 async function exportClipFrames(f, o, folder, name, progress) {
@@ -1148,12 +1359,25 @@ async function exportClipFrames(f, o, folder, name, progress) {
   const at = (t) => {
     if (o.source !== 'vfx') f.animTime = t;
     if (o.source !== 'animation') f.settings.vfx.time = t;
-    if (o.turntable) f.settings.camera.yaw = yaw0 + (360 * (t - o.start)) / o.duration;
+    const keyed = cameraAt(f.settings.camKeys, t);
+    if (keyed) Object.assign(f.settings.camera, keyed);
+    if (o.turntable) f.settings.camera.yaw = (keyed?.yaw ?? yaw0) + (360 * (t - o.start)) / o.duration;
   };
   // Lock framing across the clip, so per-frame auto-fit doesn't make the model grow and shrink.
   let fit = o.lock ? renderer.clipFit(f.job, f.settings, times, (t) => { at(t); prepare(f); }, aspect) : null;
   if (fit && o.turntable) fit = spinFit(fit);
-  const frame = (t, size = o.size, ss = o.ss) => { at(t); return draw(f, size, { out: 'pixels', supersample: ss, fit, aspect }); };
+  // Motion blur: the average of o.blur moments across the shutter, ending at t.
+  const frame = (t, size = o.size, ss = o.ss) => {
+    const shot = (tt) => { at(tt); return draw(f, size, { out: 'pixels', supersample: ss, fit, aspect }); };
+    if (!(o.blur > 1)) return shot(t);
+    let acc = null, img = null;
+    for (let k = 0; k < o.blur; k++) {
+      img = shot(Math.max(0, t - (o.shutter / o.fps) * (1 - k / (o.blur - 1))));
+      accumulate((acc ??= new Float32Array(img.data.length)), img.data);
+    }
+    resolveAccumulated(acc, o.blur, img.data);
+    return img;
+  };
   const write = async (file, bytes) => window.native.writeFile(await window.native.joinPath(folder, file), bytes);
   let format = o.format, note = null;
   const layout = format === 'sheet' ? sheetLayout(times.length, o.size, o.cols, o.pad) : null;
@@ -1189,6 +1413,24 @@ async function exportClipFrames(f, o, folder, name, progress) {
   }
 
   if (format === 'mp4' || format === 'webm') return exportVideo(o, format, times, frame, write, name, progress, aspect);
+
+  // APNG / animated WebP: each frame is encoded by the browser, then the frames are put in one file.
+  if (format === 'apng' || format === 'awebp') {
+    const parts = [];
+    let w = 0, h = 0;
+    for (const [i, t] of times.entries()) {
+      if (axState?.cancelled) return note;
+      progress(i, times.length, 'Frame');
+      const img = frame(t);
+      if (o.gifBg) flatten(img.data, o.gifBg);
+      ({ width: w, height: h } = img);
+      parts.push(await canvasBytes(canvasOf(w, h, img), format === 'apng' ? 'png' : 'webp'));
+      await yieldUI();
+    }
+    progress(times.length, times.length, 'Encoding');
+    await write(`${name}.${format === 'apng' ? 'png' : 'webp'}`, format === 'apng' ? assembleApng(parts, o.fps, o.loop) : assembleWebp(parts, o.fps, o.loop, w, h));
+    return note;
+  }
 
   // GIF: one palette from a few evenly spaced frames, then frames encode in a worker while the next one renders.
   const gif = gifWorker();
@@ -1306,6 +1548,93 @@ async function meshModel(id, name) {
     + `<Content name="MeshId"><url>rbxassetid://${id}</url></Content><Vector3 name="size"><X>${x}</X><Y>${y}</Y><Z>${z}</Z></Vector3></Properties></Item></roblox>`);
 }
 
+// ---------------- avatars ----------------
+// A user's avatar becomes an .avatar file: the avatar API reply plus the rig, rebuilt into an R6 or R15 character on load (scene/avatar.js).
+$('avatarBtn').onclick = () => { $('avatarInput').value = ''; $('avatarRig').value = store.get('avatarRig', 'auto'); $('avatarDlg').showModal(); };
+$('avatarOk').onclick = (e) => {
+  e.preventDefault();
+  const q = $('avatarInput').value.trim();
+  if (!q) return;
+  $('avatarDlg').close();
+  store.set('avatarRig', $('avatarRig').value);
+  addAvatar(q, $('avatarRig').value).catch(() => {});
+};
+// rig: 'R15', 'R6' or 'auto' (what the user picked on Roblox).
+async function addAvatar(query, rig = 'auto') {
+  status(`Looking up ${query}…`);
+  try {
+    const recipe = await window.native.getAvatar(query);
+    recipe.rig = rig === 'R15' || rig === 'R6' ? rig : recipe.avatar?.playerAvatarType === 'R15' ? 'R15' : 'R6';
+    const f = addBytes(`${recipe.username}.avatar`, new TextEncoder().encode(JSON.stringify(recipe)));
+    status(`Added ${recipe.username}'s avatar`);
+    return f;
+  } catch (e) { status(`Avatar: ${cleanError(e)}`); throw new Error(cleanError(e)); }
+}
+
+// ---------------- watch folder ----------------
+// Every model in the folder opens once; saving one on disk reloads its files (and models split out of it).
+let watchFolder = null;
+const sameBytes = (a, b) => a?.length === b.length && a.every((v, i) => v === b[i]);
+function syncWatchBtn() {
+  $('watchBtn').classList.toggle('watching', !!watchFolder);
+  $('watchBtn').textContent = watchFolder ? `Watching ${watchFolder.split(/[\\/]/).pop()} ✕` : 'Watch…';
+  $('watchBtn').title = watchFolder ? `Re-rendering models in ${watchFolder} when they change. Click to stop watching.` : 'Open every model in a folder and re-render each one whenever it changes on disk';
+}
+function receiveDiskFile({ path, name, bytes }) {
+  const b = new Uint8Array(bytes), matches = files.filter((f) => f.diskPath === path);
+  if (!matches.length) return addBytes(name, b, { diskPath: path });
+  if (sameBytes(matches[0].bytes, b)) return;
+  const src = sessionBlob(name, b);
+  for (const f of matches) { Object.assign(f, { bytes: b, src }); load(f); }
+  status(`${name} changed on disk: re-rendered`);
+}
+async function startWatch(folder, announce = true) {
+  try {
+    const list = await window.native.watchFolder(folder);
+    watchFolder = folder;
+    for (const f of list) receiveDiskFile(f);
+    if (announce) status(`Watching ${folder} (${list.length} model file${list.length === 1 ? '' : 's'})`);
+  } catch (e) { watchFolder = null; status(`Could not watch ${folder}: ${cleanError(e)}`); }
+  syncWatchBtn();
+}
+$('watchBtn').onclick = async () => {
+  if (watchFolder) { await window.native.unwatchFolder(); watchFolder = null; syncWatchBtn(); return status('Stopped watching'); }
+  const folder = await window.native.pickFolder();
+  if (folder) startWatch(folder);
+};
+window.native.onWatchFile((f) => { receiveDiskFile(f); checkpointSoon(); });
+
+// ---------------- scenes ----------------
+// Checked files combine into one .scene file (their bytes travel inside it); its layout sits above the workspace tree.
+function combineFiles(list, layout = { mode: 'row', gap: 0.25 }) {
+  list = list.filter((f) => f.bytes && f.status !== 'error' && !/\.obj$/i.test(f.name));
+  if (list.length < 2) { status('Check at least two loaded model files to combine them'); return null; }
+  const f = addBytes(`Scene (${list.length} models).scene`, sceneFile(list.map((m) => ({ name: m.name, bytes: m.bytes, path: m.path, disabled: m.disabled })), layout),
+    { settings: clone((current ?? list[0]).settings) });
+  select(f);
+  status(`Combined ${list.length} models into one scene`);
+  return f;
+}
+$('combineBtn').onclick = () => combineFiles(files.filter((f) => f.checked));
+const sceneLayout = (f) => (f.layoutOf === f.bytes ? f.layout : Object.assign(f, { layoutOf: f.bytes, layout: JSON.parse(new TextDecoder().decode(f.bytes)).layout }).layout);
+function syncSceneBar() {
+  const scene = /\.scene$/i.test(current?.name ?? '');
+  $('sceneBar').hidden = !scene;
+  if (!scene) return;
+  const l = sceneLayout(current);
+  $('sceneLayout').value = l.mode; $('sceneGap').value = l.gap;
+}
+function setSceneLayout(patch, f = current) {
+  const data = JSON.parse(new TextDecoder().decode(f.bytes));
+  data.layout = { ...data.layout, ...patch };
+  const bytes = new TextEncoder().encode(JSON.stringify(data));
+  Object.assign(f, { bytes, src: sessionBlob(f.name, bytes) });
+  load(f);
+}
+$('sceneLayout').replaceChildren(...SCENE_LAYOUTS.map((m) => new Option(m[0].toUpperCase() + m.slice(1), m)));
+$('sceneLayout').onchange = () => setSceneLayout({ mode: $('sceneLayout').value });
+$('sceneGap').onchange = () => setSceneLayout({ gap: clamp(+$('sceneGap').value || 0, 0, 3) });
+
 // ---------------- Roblox Studio plugin ----------------
 // Selections sent from Studio: one file each. Sending the same instance again replaces that file's model and keeps
 // its settings, so re-sending after an edit re-renders it.
@@ -1361,6 +1690,24 @@ $('resetBtn').onclick = () => {
   for (const f of targets()) { f.settings = defaultSettings(); thumb(f, 100); }
   buildPanel(); requestPreview();
 };
+$('randomBtn').onclick = () => {
+  if (!current) return;
+  const look = randomLook();
+  for (const f of targets()) { patchSettings(f.settings, look); thumb(f, 100); }
+  buildPanel(); requestPreview();
+  status('A random look: click again for another one (Ctrl+Z goes back)');
+};
+$('pinBtn').onclick = () => {
+  if (!current) return;
+  for (const f of targets()) f.pinned = clone(f.settings);
+  $('swapBtn').disabled = false;
+  status('Pinned this look as A: keep editing, then Swap A/B to flip between them');
+};
+$('swapBtn').onclick = () => {
+  for (const f of targets()) if (f.pinned) { [f.settings, f.pinned] = [withDefaults(f.pinned), f.settings]; thumb(f, 100); }
+  buildPanel(); requestPreview();
+  status('Swapped looks A and B');
+};
 $('defaultBtn').onclick = () => { if (current) { store.set('defaultSettings', current.settings); status('Saved as default for new files'); } };
 $('reloadBtn').onclick = () => { if (current) { clearMemoryCache(); load(current); } };
 $('trayBtn').onclick = () => window.native.hideToTray();
@@ -1383,7 +1730,7 @@ $('profileSelect').onchange = () => {
   const name = $('profileSelect').value;
   $('profileDelete').disabled = !name;
   if (!name || !current) return;
-  for (const f of targets()) { f.settings = withDefaults(clone(profiles[name])); thumb(f, 100); }
+  for (const f of targets()) { f.settings = withDefaults(clone(profiles[name])); f.profile = name; thumb(f, 100); }
   buildPanel(); requestPreview();
   status(`Profile "${name}" applied to ${targets().length} file${targets().length > 1 ? 's' : ''}`);
 };
@@ -1461,7 +1808,12 @@ addEventListener('dragover', (e) => e.preventDefault());
 addEventListener('drop', async (e) => {
   e.preventDefault(); dragDepth = 0; $('dropOverlay').hidden = true;
   const dropped = [...e.dataTransfer.files], image = dropped.find((f) => f.type.startsWith('image/'));
-  addFiles(dropped.filter((f) => f !== image));
+  const cube = dropped.find((f) => /\.cube$/i.test(f.name)), hdr = dropped.find((f) => /\.(hdr|exr)$/i.test(f.name));
+  addFiles(dropped.filter((f) => f !== image && f !== cube && f !== hdr));
+  try {
+    if (cube && current) { setValue('lut', 'image', await lutFromFile(cube, cube.name)); buildPanel(); status(`LUT: ${cube.name}`); }
+    if (hdr && current) { setValue('lighting', 'hdri', await window.native.importHdri(window.native.pathForFile(hdr))); buildPanel(); status(`HDRI: ${hdr.name}`); }
+  } catch (err) { status(`Could not load ${(cube ?? hdr).name}: ${cleanError(err)}`); }
   if (image && current) { // an image becomes the background of the current (or linked) files
     const url = await imageDataUrl(image).catch((err) => status('Could not read image: ' + err.message));
     if (url) { setValue('background', 'image', url); setValue('background', 'mode', 'image'); buildPanel(); status(`Background image: ${image.name}`); }
@@ -1565,6 +1917,7 @@ addEventListener('keydown', (e) => {
 const agent = createAgent({
   files, current: () => current, aspect: aspectOf, addBytes, receiveStudio, addAssetIds, removeFile, select, splitOut, setDisabled, load,
   thumb, buildPanel, renderList, requestPreview, syncAnimBar, encode, exportClip, ensureTrack, imageDataUrl,
+  addAvatar, combineFiles, setSceneLayout, lutFromFile, nameFor, uniqueName,
   profiles: () => profiles,
   saveProfile: async (name, settings) => { profiles[name] = settings; await window.native.setProfiles(profiles); renderProfiles(); },
 });
@@ -1577,4 +1930,4 @@ window.native.onAgentCall(async (method, params) => {
 });
 
 // Test hook: lets an automated harness load files and grab renders.
-window.__app = { addFiles, addAssetIds, files, renderer, encode, select, loadAnimationId, exportClip, sessionRestored, saveSession, splitOut, sheetPlan };
+window.__app = { addFiles, addAssetIds, addBytes, files, renderer, encode, select, loadAnimationId, exportClip, sessionRestored, saveSession, splitOut, sheetPlan, combineFiles, startWatch };

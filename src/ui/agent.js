@@ -1,13 +1,14 @@
 // What AI agents can do in the app (through the MCP server in src/mcp/server.mjs and main's local API).
 // Each handler takes one params object and returns JSON (images as base64 PNG). Files are picked by their id from
 // list_files; `files` may also be "all" or "checked", and an omitted file means the one open in the app.
-import { SCHEMA, TEXT_FIELDS, LIGHTING_PRESETS, patchSettings, withDefaults, clone } from '../settings.js';
+import { SCHEMA, TEXT_FIELDS, STROKE_FIELDS, CAMKEY_FIELDS, LIGHTING_PRESETS, patchSettings, withDefaults, clone } from '../settings.js';
 import { nameOf, atPath } from '../rbx/instance.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const b64 = (bytes) => { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(s); };
 const VIEWS = { front: [0, 0, 0], '3/4': [35, 20, 0], side: [90, 0, 0], back: [180, 0, 0], top: [0, 89, 0], tilt: [30, 18, -14] };
 const IMAGE_FORMATS = { png: 'png', webp: 'webp', jpeg: 'jpg' };
+const CLIP_FORMATS = ['png', 'sheet', 'gif', 'mp4', 'webm', 'apng', 'awebp'];
 
 export function createAgent(app) {
   const one = (id) => {
@@ -50,6 +51,27 @@ export function createAgent(app) {
       return { removed: list.map((f) => f.id) };
     },
     async selectFile({ file }) { const f = one(file); app.select(f); return summary(f); },
+    async addAvatar({ user, rig }) { return summary(await ready(await app.addAvatar(String(user ?? ''), rig))); },
+    // Several files' models in one new scene file; layout row | arc | grid, gap as a fraction of the model width.
+    async combineFiles({ files, layout = 'row', gap = 0.25 }) {
+      const list = (await Promise.all(many(files ?? 'checked').map(ready)));
+      const f = app.combineFiles(list, { mode: ['row', 'arc', 'grid'].includes(layout) ? layout : 'row', gap: Math.min(3, Math.max(0, +gap || 0)) });
+      if (!f) throw new Error('Give at least two loaded model files');
+      return summary(await ready(f));
+    },
+    async setHdri({ files, path }) {
+      const list = many(files), name = path ? await window.native.importHdri(String(path)) : '';
+      for (const f of list) f.settings.lighting.hdri = name;
+      refresh(list);
+      return { files: list.map((f) => f.id), hdri: name || null };
+    },
+    async setLut({ files, path, strength = 1 }) {
+      const list = many(files);
+      const url = path ? await app.lutFromFile(new Blob([new Uint8Array(await window.native.readLocal(String(path), 'lut'))]), String(path)) : '';
+      for (const f of list) Object.assign(f.settings.lut, { image: url, strength: Math.min(1, Math.max(0, +strength)) });
+      refresh(list);
+      return { files: list.map((f) => f.id) };
+    },
 
     async modelTree({ file, path = '', depth = 3, limit = 400 }) {
       const f = await ready(one(file)), roots = f.job?.tree?.roots;
@@ -79,13 +101,18 @@ export function createAgent(app) {
       const field = (f) => ({ key: f.key, label: f.label, type: f.type, ...(f.min != null && { min: f.min, max: f.max, step: f.step }), ...(f.options && { options: f.options }), default: f.def });
       return {
         sections: SCHEMA.map((s) => ({ id: s.id, title: s.title, fields: s.fields.map(field) })),
-        textLayer: TEXT_FIELDS.map(field), lightingPresets: Object.keys(LIGHTING_PRESETS), views: Object.keys(VIEWS),
-        notes: 'Pixel values are "px at 512" and scale with the output size. Text x/y run -0.5..0.5 with +y up. camera.yaw 0 looks at the model front.',
+        textLayer: TEXT_FIELDS.map(field), strokeLayer: STROKE_FIELDS.map(field), cameraKey: CAMKEY_FIELDS.map(field),
+        lightingPresets: Object.keys(LIGHTING_PRESETS), views: Object.keys(VIEWS),
+        notes: 'Pixel values are "px at 512" and scale with the output size. Text x/y run -0.5..0.5 with +y up. camera.yaw 0 looks at the model front. '
+          + '"strokes" is a list of extra outline strokes stacked outward (any number). "camKeys" is a list of camera keyframes { t, yaw, pitch, roll, zoom, offsetX, offsetY } '
+          + 'the camera eases between over the timeline (vfx.time) in animated exports. Motion, pattern spin and VHS effects also run on vfx.time. '
+          + 'lighting.hdri and lut.image are set with set_hdri / set_lut.',
       };
     },
     async getSettings({ file }) {
       const s = clone(one(file).settings);
       if (s.background.image) s.background.image = '(image set)';
+      if (s.lut.image) s.lut.image = '(LUT set)';
       return s;
     },
     // settings: { section: { key: value }, texts: [...] }; view: a camera angle preset name.
@@ -115,7 +142,7 @@ export function createAgent(app) {
       const p = app.profiles()[name];
       if (!p) throw new Error(`No profile named "${name}"`);
       const list = many(files);
-      for (const f of list) f.settings = withDefaults(clone(p));
+      for (const f of list) { f.settings = withDefaults(clone(p)); f.profile = name; }
       refresh(list);
       return { files: list.map((f) => f.id) };
     },
@@ -150,7 +177,7 @@ export function createAgent(app) {
       const bytes = await app.encode(f, { size: Math.min(2048, Math.max(64, +size || 512)), format: 'png', ss: supersample > 1 ? 2 : 1, aspect: +aspect || app.aspect() });
       return { image: b64(bytes), file: summary(f) };
     },
-    async exportImages({ files, folder, size = 512, format = 'png', aspect, supersample = 2 }) {
+    async exportImages({ files, folder, size = 512, format = 'png', aspect, supersample = 2, trim = false, margin = 0 }) {
       if (!folder) throw new Error('folder is required');
       const ext = IMAGE_FORMATS[format];
       if (!ext) throw new Error(`format must be ${Object.keys(IMAGE_FORMATS).join(', ')}`);
@@ -160,23 +187,23 @@ export function createAgent(app) {
         while (used.has(name)) name = `${safeName(f.name)}_${n++}`;
         used.add(name);
         const path = await window.native.joinPath(String(folder), `${name}.${ext}`);
-        await window.native.writeFile(path, await app.encode(f, { size: Math.min(4096, Math.max(16, +size || 512)), format, ss: supersample > 1 ? 2 : 1, aspect: +aspect || app.aspect() }));
+        await window.native.writeFile(path, await app.encode(f, { size: Math.min(4096, Math.max(16, +size || 512)), format, ss: supersample > 1 ? 2 : 1, aspect: +aspect || app.aspect(), trim: !!trim, margin: Math.max(0, +margin || 0) }));
         written.push(path);
       }
       app.requestPreview();
       return { written };
     },
     async exportAnimation({ files, folder, format = 'gif', size = 512, fps = 24, start = 0, duration, source = 'both', turntable = false,
-      loop = true, lock = true, aspect, supersample = 1, transparent = true, backgroundColor = '#2b2d42' }) {
+      loop = true, lock = true, aspect, supersample = 1, transparent = true, backgroundColor = '#2b2d42', motionBlur = 0, shutter = 0.5 }) {
       if (!folder) throw new Error('folder is required');
-      if (!['png', 'sheet', 'gif', 'mp4', 'webm'].includes(format)) throw new Error('format must be png, sheet, gif, mp4 or webm');
+      if (!CLIP_FORMATS.includes(format)) throw new Error(`format must be ${CLIP_FORMATS.join(', ')}`);
       const bg = /^#[0-9a-f]{6}$/i.test(backgroundColor) ? [1, 3, 5].map((i) => parseInt(backgroundColor.slice(i, i + 2), 16)) : [43, 45, 66];
       const list = (await Promise.all(many(files).map(ready))).filter((f) => f.job), out = [];
       for (const f of list) {
         const len = duration ?? (f.job.animations.find((a) => a.key === f.animSel)?.track?.length || f.settings.vfx.duration);
         const o = { size: Math.min(format === 'gif' ? 1024 : 4096, Math.max(16, +size || 512)), ss: supersample > 1 ? 2 : 1, format, source, fps: Math.min(60, Math.max(1, Math.round(+fps || 24))),
           start: Math.max(0, +start || 0), duration: Math.max(0.05, +len || 2), loop, lock, turntable, cols: 0, pad: 0, aspect: +aspect || app.aspect(),
-          gifBg: transparent ? null : bg, bgColor: bg };
+          gifBg: transparent ? null : bg, bgColor: bg, blur: [0, 4, 8, 16].includes(+motionBlur) ? +motionBlur : 0, shutter: Math.min(1, Math.max(0.05, +shutter || 0.5)) };
         const saved = [f.animTime, f.settings.vfx.time], name = safeName(f.name);
         try { await app.exportClip(f, o, String(folder), name, () => {}); } finally { [f.animTime, f.settings.vfx.time] = saved; }
         out.push({ file: f.id, folder: String(folder), name, format });

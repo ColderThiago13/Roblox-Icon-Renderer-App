@@ -5,6 +5,7 @@ import fsSync from 'node:fs';
 import { createConnection } from 'node:net';
 import http from 'node:http';
 import { exec } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import updaterPkg from 'electron-updater';
 
@@ -273,12 +274,79 @@ function startLocalServer() {
   server.listen(STUDIO_PORT, '127.0.0.1');
 }
 
-// Files agents open by path: only models and images.
-const LOCAL_KINDS = { model: /\.(rbxmx?|obj)$/i, image: /\.(png|jpe?g|webp|gif|bmp)$/i };
+// Files agents open by path: only models, images, LUTs and HDRIs.
+const LOCAL_KINDS = { model: /\.(rbxmx?|obj)$/i, image: /\.(png|jpe?g|webp|gif|bmp)$/i, lut: /\.(cube|png)$/i, hdri: /\.(hdr|exr|png|jpe?g|webp)$/i };
+const KIND_NAMES = { model: '.rbxm, .rbxmx or .obj', image: 'image', lut: '.cube or .png', hdri: '.hdr, .exr or image' };
 ipcMain.handle('file:readLocal', (_e, filePath, kind) => {
-  if (!LOCAL_KINDS[kind]?.test(String(filePath))) throw new Error(`Only ${kind === 'image' ? 'image' : '.rbxm, .rbxmx or .obj'} files can be opened`);
+  if (!LOCAL_KINDS[kind]?.test(String(filePath))) throw new Error(`Only ${KIND_NAMES[kind] ?? 'model'} files can be opened`);
   return fs.readFile(path.resolve(String(filePath)));
 });
+
+// ---------- HDRI library ----------
+// HDRIs are large, so settings keep a name and the file lives in userData/hdri, named by its content hash.
+const HDRI = () => path.join(app.getPath('userData'), 'hdri');
+const HDRI_NAME = /^[0-9a-f]{8,64}\.(hdr|exr|png|jpe?g|webp)$/i;
+async function addHdri(file) {
+  if (!LOCAL_KINDS.hdri.test(file)) throw new Error('Choose a .hdr, .exr or image file');
+  const bytes = await fs.readFile(file), name = `${createHash('sha256').update(bytes).digest('hex').slice(0, 16)}${path.extname(file).toLowerCase()}`;
+  await fs.mkdir(HDRI(), { recursive: true });
+  await fs.writeFile(path.join(HDRI(), name), bytes);
+  return name;
+}
+ipcMain.handle('hdri:import', async (e, filePath) => {
+  if (filePath) return addHdri(path.resolve(String(filePath)));
+  const r = await dialog.showOpenDialog(BrowserWindow.fromWebContents(e.sender), { filters: [{ name: 'HDRI / panorama', extensions: ['hdr', 'exr', 'png', 'jpg', 'jpeg', 'webp'] }], properties: ['openFile'] });
+  return r.canceled ? null : addHdri(r.filePaths[0]);
+});
+ipcMain.handle('hdri:get', (_e, name) => {
+  if (!HDRI_NAME.test(String(name))) throw new Error('Bad HDRI name');
+  return fs.readFile(path.join(HDRI(), String(name)));
+});
+
+// ---------- avatars ----------
+// Username or user ID -> what the user wears (public avatar API, no login needed; the asset files still use the
+// Roblox access settings like any other asset).
+ipcMain.handle('avatar:get', async (_e, query) => {
+  const q = String(query ?? '').trim();
+  let userId = /^\d+$/.test(q) ? q : null, username = null;
+  if (!userId) {
+    if (!/^[A-Za-z0-9_]{3,20}$/.test(q)) throw new Error('Enter a Roblox username or user ID');
+    const r = await net.fetch('https://users.roblox.com/v1/usernames/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ usernames: [q], excludeBannedUsers: false }) });
+    const hit = r.ok ? (await r.json()).data?.[0] : null;
+    if (!hit) throw new Error(`No Roblox user named "${q}"`);
+    ({ id: userId, name: username } = hit);
+  }
+  if (!username) {
+    const r = await net.fetch(`https://users.roblox.com/v1/users/${userId}`);
+    if (!r.ok) throw new Error(`No Roblox user with ID ${userId}`);
+    username = (await r.json()).name;
+  }
+  const r = await net.fetch(`https://avatar.roblox.com/v2/avatar/users/${userId}/avatar`);
+  if (!r.ok) throw new Error(`Could not read ${username}'s avatar (HTTP ${r.status})`);
+  return { type: 'avatar', userId: String(userId), username, avatar: await r.json() };
+});
+
+// ---------- watch folder ----------
+// Model files in the folder open (once) and re-render whenever they change on disk.
+let watcher = null;
+const isModel = (f) => LOCAL_KINDS.model.test(f);
+ipcMain.handle('watch:start', async (e, folder) => {
+  watcher?.close();
+  const dir = path.resolve(String(folder)), sender = e.sender, timers = new Map();
+  const send = (file) => {
+    clearTimeout(timers.get(file));
+    timers.set(file, setTimeout(async () => { // editors save in several writes: wait for the file to settle
+      timers.delete(file);
+      const bytes = await fs.readFile(file).catch(() => null);
+      if (bytes?.length && !sender.isDestroyed()) sender.send('watch:file', { path: file, name: path.basename(file), bytes });
+    }, 400));
+  };
+  watcher = fsSync.watch(dir, (_ev, name) => { if (name && isModel(name)) send(path.join(dir, name)); });
+  watcher.on('error', () => { watcher?.close(); watcher = null; });
+  const files = (await fs.readdir(dir)).filter(isModel);
+  return Promise.all(files.map(async (f) => ({ path: path.join(dir, f), name: f, bytes: await fs.readFile(path.join(dir, f)) })));
+});
+ipcMain.handle('watch:stop', () => { watcher?.close(); watcher = null; });
 
 // ---------- AI agent setup (MCP) ----------
 // Agents launch src/mcp/server.mjs with this app's own executable as Node (ELECTRON_RUN_AS_NODE), so nothing else

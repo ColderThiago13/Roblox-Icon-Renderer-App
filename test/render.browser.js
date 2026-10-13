@@ -3,9 +3,9 @@ import { buildTrails } from '../src/scene/trails.js';
 import { buildVfx } from '../src/scene/vfx.js';
 import { buildRig } from '../src/scene/anim.js';
 import { setPose, updateVfx } from '../src/scene/job.js';
-import { IconRenderer, samplePoints, LAYER } from '../src/render/renderer.js';
+import { IconRenderer, samplePoints, LAYER, TOON_READY, equirectTexture } from '../src/render/renderer.js';
 import { makeInstance, finalizeTree } from '../src/rbx/instance.js';
-import { defaultSettings, textLayer } from '../src/settings.js';
+import { defaultSettings, textLayer, withDefaults, patchSettings } from '../src/settings.js';
 import { overlayReady } from '../src/render/overlay.js';
 import * as THREE from 'three';
 
@@ -231,6 +231,77 @@ try {
   const curved = render(layered), [Lc] = renderer.layouts, first = pixel(curved, Math.round((Lc.cx + Lc.box[0] * 0.85) * 128), Math.round(Lc.cy * 128));
   check(first[0] > 200 && first[2] < 80, 'Curved rainbow starts red/orange: ' + first);
   settings.texts = []; settings.background.mode = 'transparent';
+
+  // Post effects: each one changes a lit 3/4 view of an L-shaped block pair, and all of them together still render.
+  check(TOON_READY, 'Toon shading hook found in three\'s lighting chunk');
+  const ell = inst('Model', 'L');
+  inst('Part', 'Floor', ell, { size: { x: 4, y: 1, z: 4 }, cframe: cf(0, 0, 0), color: { r: 0.8, g: 0.3, b: 0.2 } });
+  inst('Part', 'Wall', ell, { size: { x: 4, y: 3, z: 1 }, cframe: cf(0, 2, 1.5), color: { r: 0.2, g: 0.5, b: 0.9 } });
+  const ellJob = await buildScene(finalizeTree([ell]), () => {});
+  ellJob.points = samplePoints(ellJob.root);
+  const lit = withDefaults(JSON.parse(JSON.stringify(settings)));
+  patchSettings(lit, { camera: { yaw: 35, pitch: 25, zoom: 0.8 }, lighting: { key: 2.5, ambient: 0.6, env: 0.3 }, shadows: { selfShadows: true } });
+  const look = async (patch, time = 0) => {
+    const s2 = withDefaults(JSON.parse(JSON.stringify(lit)));
+    const notes = patchSettings(s2, patch);
+    check(!notes.length, 'Effect patch: ' + notes.join('; '));
+    s2.vfx.time = time;
+    await overlayReady(s2);
+    return renderer.render(ellJob, s2, 128, { out: 'pixels' });
+  };
+  const plain = await look({});
+  const lutCanvas = Object.assign(document.createElement('canvas'), { width: 4, height: 2 }), lg = lutCanvas.getContext('2d'); // 2³ inverting LUT
+  for (let b = 0; b < 2; b++) for (let g = 0; g < 2; g++) for (let r = 0; r < 2; r++) { lg.fillStyle = `rgb(${255 - r * 255},${255 - g * 255},${255 - b * 255})`; lg.fillRect(b * 2 + r, g, 1, 1); }
+  const hdriCanvas = Object.assign(document.createElement('canvas'), { width: 64, height: 32 }), hg = hdriCanvas.getContext('2d');
+  hg.fillStyle = '#ff2000'; hg.fillRect(0, 0, 64, 16); hg.fillStyle = '#0020ff'; hg.fillRect(0, 16, 64, 16);
+  const hdriBytes = await new Promise((r) => hdriCanvas.toBlob(async (bl) => r(new Uint8Array(await bl.arrayBuffer()))));
+  renderer.setHdri('0123456789abcdef.png', await equirectTexture(hdriBytes, 'x.png'));
+  const strokes = (n) => ({ outline: { enabled: true, thickness: 2 }, strokes: Array.from({ length: n }, (_, i) => ({ color: i % 2 ? '#00ff00' : '#ff0000', width: 2 })) });
+  const EFFECTS = {
+    'ambient occlusion': { ao: { enabled: true, intensity: 3, radius: 0.3 } }, 'toon shading': { toon: { enabled: true, bands: 2 } },
+    'inner edge lines': { edges: { enabled: true, thickness: 2, normal: 1, depth: 1 } }, 'rim glow': { rim: { enabled: true, intensity: 3 } },
+    'depth of field': { dof: { enabled: true, blur: 12, focus: 0 } }, 'tilt-shift': { tiltShift: { enabled: true, blur: 12, width: 0 } },
+    'lens flare': { lensFlare: { enabled: true, threshold: 0, streaks: 3, ghosts: 3, halo: 3 } }, LUT: { lut: { image: lutCanvas.toDataURL(), strength: 1 } },
+    halftone: { halftone: { enabled: true, size: 8 } }, 'CMYK halftone': { halftone: { enabled: true, mode: 'cmyk' } }, dithering: { dither: { enabled: true, palette: 'gameboy' } },
+    'inner shadow': { innerShadow: { enabled: true, opacity: 1, offsetX: 6, offsetY: -6 } }, bevel: { bevel: { enabled: true, strength: 1, size: 10 } },
+    'light rays': { godRays: { enabled: true, intensity: 3 } }, strokes: strokes(3), 'reflection floor': { reflection: { enabled: true, opacity: 1 } },
+    pedestal: { pedestal: { shape: 'podium' } }, sunburst: { background: { mode: 'sunburst' } }, stars: { background: { mode: 'stars' } },
+    'rarity frame': { frame: { style: 'legendary' } }, CRT: { retro: { scanlines: 1, curvature: 0.5, mask: 1 } }, VHS: { retro: { vhs: 1, noise: 1 } },
+    HDRI: { lighting: { hdri: '0123456789abcdef.png', env: 2 } }, blur: { blur: { enabled: true, size: 6 } },
+  };
+  for (const [label, patch] of Object.entries(EFFECTS)) {
+    const img = await look(patch);
+    check(img.data.some((v, i) => Math.abs(v - plain.data[i]) > 12), `${label} changes the image`);
+    check(!img.data.every((v, i) => i % 4 !== 3 || v === 0), `${label} keeps the model visible`);
+  }
+  // Sunburst turned 45° (spin 45°/s at 1 s): atan wraps along the lower-left diagonal, which must stay one pure ray color.
+  const burst = await look({ background: { mode: 'sunburst', color1: '#ff0000', color2: '#0000ff', patternCount: 16, patternScale: 1, patternSpin: 45 } }, 1);
+  for (let x = 6; x <= 30; x++) for (const y of [127 - x, 128 - x]) {
+    const p = pixel(burst, x, y);
+    check(Math.min(p[0], p[2]) < 40, `Sunburst seam at ${x},${y}: ${p}`);
+  }
+  const moved = [await look({ motion: { mode: 'float', amount: 2 } }, 0.5), await look({ motion: { mode: 'float', amount: 2 } }, 1.5)];
+  check(moved[0].data.some((v, i) => Math.abs(v - moved[1].data[i]) > 12), 'Motion moves the model over time');
+  const cover = (img) => img.data.filter((v, i) => i % 4 === 3 && v > 128).length;
+  const [c0, c1, c12] = [await look(strokes(0)), await look(strokes(1)), await look(strokes(12))].map(cover);
+  check(c0 < c1 && c1 < c12, `Strokes stack outward, any number of them (coverage ${c0} < ${c1} < ${c12})`);
+  const soft = (img) => img.data.filter((v, i) => i % 4 === 3 && v > 8 && v < 247).length;
+  check(soft(await look({ blur: { enabled: true, size: 6, target: 'model' } })) > soft(plain) * 2, 'Model blur softens the edges');
+  const stripes = { background: { mode: 'stripes', color1: '#ff0000', color2: '#0000ff', patternCount: 16 } };
+  const [sharpBg, blurBg] = [await look(stripes), await look({ ...stripes, blur: { enabled: true, size: 20, target: 'background' } })];
+  check(pixel(blurBg, 3, 3).toString() !== pixel(sharpBg, 3, 3).toString() && Math.abs(pixel(blurBg, 3, 3)[0] - pixel(blurBg, 3, 3)[2]) < 120, 'Background blur mixes the stripes: ' + pixel(blurBg, 3, 3));
+  check(pixel(blurBg).toString() === pixel(sharpBg).toString(), 'Background blur leaves the model sharp');
+  const greenRows = (img) => { let n = 0; for (let y = 96; y < 128; y++) for (let x = 0; x < 128; x++) { const p = pixel(img, x, y); n += p[1] > 200 && p[0] < 60 && p[2] < 60; } return n; };
+  const ringed = (outline) => look({ pedestal: { shape: 'podium', outline }, outline: { enabled: true, thickness: 4, color: '#00ff00' } });
+  const [pedIn, pedOut] = [await ringed(true), await ringed(false)];
+  check(greenRows(pedOut) < greenRows(pedIn) / 2, `Outline skips the pedestal unless asked (bottom outline px ${greenRows(pedOut)} vs ${greenRows(pedIn)})`);
+  check(greenRows(pedOut) > 0 || pedOut.data.some((v, i) => v !== pedIn.data[i]), 'Model outline still drawn with a pedestal');
+  const gb = await look({ dither: { enabled: true, palette: 'gameboy' } }), GB = [[15, 56, 15], [48, 98, 48], [139, 172, 15], [155, 188, 15]];
+  check([...Array(gb.data.length / 4).keys()].every((i) => gb.data[i * 4 + 3] < 250 || GB.some((p) => p.every((v, k) => Math.abs(v - gb.data[i * 4 + k]) <= 2))), 'Dithering keeps to the palette');
+  const all = {};
+  for (const patch of Object.values(EFFECTS)) for (const [k, v] of Object.entries(patch)) all[k] = Array.isArray(v) ? v : { ...all[k], ...v };
+  const everything = await look({ ...all, motion: { mode: 'bounce' }, background: { mode: 'dots' }, stylize: { pixelate: 3 } }, 0.3);
+  check(everything.data.some((v) => v > 0), 'Every effect at once renders');
   check(renderer.gl.info.programs.every((p) => p.diagnostics?.runnable !== false), 'All shaders must compile');
   // GPU reset: renders throw instead of returning blank images, and the renderer rebuilds on a fresh canvas.
   const oldCanvas = renderer.canvas;
@@ -242,5 +313,5 @@ try {
   const fresh = await restored;
   check(fresh !== oldCanvas && fresh.isConnected && !oldCanvas.isConnected && fresh.id === 'view', 'Fresh canvas swapped into the page');
   dominant(render(await scene()), 0, 'Renders again after the GPU comes back');
-  window.renderTest.done({ ok: true, message: 'WebGL appearance layering, asset fallback, trails and outline tests ok' });
+  window.renderTest.done({ ok: true, message: 'WebGL appearance layering, asset fallback, trails, outline and post-effect tests ok' });
 } catch (e) { window.renderTest.done({ ok: false, message: e.stack || e.message }); }

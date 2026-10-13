@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer, webFrame } = require('electron');
+const { contextBridge, ipcRenderer, webFrame, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('native', {
   getAsset: (id) => ipcRenderer.invoke('asset:get', id),
@@ -40,6 +40,13 @@ contextBridge.exposeInMainWorld('native', {
     ipcRenderer.send('agent:ready');
   },
   readLocal: (filePath, kind) => ipcRenderer.invoke('file:readLocal', filePath, kind),
+  pathForFile: (file) => { try { return webUtils.getPathForFile(file) || null; } catch { return null; } },
+  importHdri: (filePath) => ipcRenderer.invoke('hdri:import', filePath),
+  getHdri: (name) => ipcRenderer.invoke('hdri:get', name),
+  getAvatar: (query) => ipcRenderer.invoke('avatar:get', query),
+  watchFolder: (folder) => ipcRenderer.invoke('watch:start', folder),
+  unwatchFolder: () => ipcRenderer.invoke('watch:stop'),
+  onWatchFile: (cb) => ipcRenderer.on('watch:file', (_e, f) => cb(f)),
   agentSetup: (client) => ipcRenderer.invoke('agent:setup', client),
   agentStatus: () => ipcRenderer.invoke('agent:status'),
 });

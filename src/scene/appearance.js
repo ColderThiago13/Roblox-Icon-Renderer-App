@@ -15,6 +15,8 @@ const BODY = {
 const R6 = ['Head', 'Torso', 'Left Arm', 'Right Arm', 'Left Leg', 'Right Leg'];
 // Humanoid R6 bodies: Roblox swaps these blocks for its chamfered limb meshes (textured from one composited atlas).
 const CLASSIC = { Torso: 'torso', 'Left Arm': 'leftarm', 'Right Arm': 'rightarm', 'Left Leg': 'leftleg', 'Right Leg': 'rightleg' };
+const R15_PARTS = new Set(['UpperTorso', 'LowerTorso', 'LeftUpperArm', 'LeftLowerArm', 'LeftHand', 'RightUpperArm', 'RightLowerArm', 'RightHand',
+  'LeftUpperLeg', 'LeftLowerLeg', 'LeftFoot', 'RightUpperLeg', 'RightLowerLeg', 'RightFoot']);
 const ORDER = { torso: ['UpperTorso', 'LowerTorso'], leftarm: ['LeftUpperArm', 'LeftLowerArm', 'LeftHand'],
   rightarm: ['RightUpperArm', 'RightLowerArm', 'RightHand'], leftleg: ['LeftUpperLeg', 'LeftLowerLeg', 'LeftFoot'], rightleg: ['RightUpperLeg', 'RightLowerLeg', 'RightFoot'] };
 
@@ -27,7 +29,7 @@ export function collectAppearances(tree) {
     const shirt = kids.find((c) => c.className === 'Shirt'), pants = kids.find((c) => c.className === 'Pants');
     const graphic = kids.find((c) => c.className === 'ShirtGraphic');
     const humanoid = kids.some((c) => c.className === 'Humanoid');
-    let body = null; // shared by the character's classic parts, so its atlas is composited once
+    let body = null, r15 = null; // shared by the character's classic / R15 parts, so their atlases are composited once
     for (const part of kids) {
       const name = nameOf(part), region = BODY[name];
       if (!region || !['Part', 'MeshPart'].includes(part.className)) continue;
@@ -41,14 +43,18 @@ export function collectAppearances(tree) {
         if (segment === part) slice = [offset / total, end / total];
         offset = end;
       }
-      // A SpecialMesh/CharacterMesh or non-block shape keeps its own look.
-      const classic = humanoid && part.className === 'Part' && CLASSIC[name] && !characterMesh && (part.props.shape ?? 1) === 1
+      // A SpecialMesh or non-block shape keeps its own look; a CharacterMesh reads the same atlas as the classic limb.
+      const classic = humanoid && part.className === 'Part' && CLASSIC[name] && (part.props.shape ?? 1) === 1
         && !part.children.some((c) => /^(SpecialMesh|BlockMesh|CylinderMesh)$/.test(c.className));
-      if (classic) body ??= { shirt, pants, graphic, colors: Object.fromEntries(Object.entries(CLASSIC).map(([n, r]) => {
+      if (classic) body ??= { shirt, pants, graphic, atlases: new Map(), colors: Object.fromEntries(Object.entries(CLASSIC).map(([n, r]) => {
         const p = kids.find((c) => nameOf(c) === n)?.props ?? {};
         return [r, colors?.props[r + 'color3'] ?? brickColor(colors?.props[r + 'color']) ?? p.color3uint8 ?? p.color ?? brickColor(p.brickcolor)];
       })) };
-      result.set(part, { region, color, characterMesh, shirt, pants, graphic, slice, classic: classic ? body : null });
+      // R15 body MeshParts read per-region atlases (SurfaceAppearance bodies keep their own PBR look).
+      const isR15 = humanoid && part.className === 'MeshPart' && R15_PARTS.has(name) && !part.children.some((c) => c.className === 'SurfaceAppearance');
+      if (isR15) r15 ??= { shirt, pants, graphic, atlases: new Map() };
+      const texture = part.props.textureid || part.props.texturecontent || null;
+      result.set(part, { region, color, humanoid, characterMesh, shirt, pants, graphic, slice, texture, classic: classic ? body : null, r15: isR15 ? r15 : null });
     }
   }
   return result;
@@ -144,26 +150,17 @@ export function chamferedLimb(name) {
   return chamfered.get(w);
 }
 
-// Roblox composites body colors, then pants, shirt and t-shirt (by the meshes' z order) into a 1024x512 atlas with
-// the Composit*.mesh layouts: positions are atlas pixels (y down), UVs point into the 585x559 template / graphic.
+// Roblox composites body colors, then pants, shirt and t-shirt (by the meshes' z order) into an atlas with the
+// Composit*.mesh layouts: positions are atlas pixels (y down), UVs point into the 585x559 template / graphic.
 // The limb meshes' UVs read that atlas directly. Composited in sRGB like the 2D templates (no color conversion).
 let compositor = null;
-const COMPOSITE = [['TorsoBase', 'torso'], ['LeftArmBase', 'leftarm'], ['RightArmBase', 'rightarm'], ['LeftLegBase', 'leftleg'], ['RightLegBase', 'rightleg']];
-async function buildClassicAtlas(body, warn) {
-  const mesh = (n) => loadMesh(`rbxasset://avatar/compositing/Composit${n}.mesh`);
-  const raw = (c, d = 0xa3a2a5) => (c ? new THREE.Color().setRGB(c.r, c.g, c.b, THREE.LinearSRGBColorSpace) : new THREE.Color(d));
-  const layers = [];
-  for (const [n, region] of COMPOSITE) layers.push({ geometry: await mesh(n), color: raw(body.colors[region]) });
-  for (const [inst, url, n] of [[body.pants, body.pants?.props.pantstemplate, 'PantsTemplate'], [body.shirt, body.shirt?.props.shirttemplate, 'ShirtTemplate'], [body.graphic, body.graphic?.props.graphic, 'TShirt']]) {
-    if (!url) continue;
-    try {
-      const map = await loadTexture(url, false);
-      layers.push({ geometry: await mesh(n), map, color: raw(inst.props.color3 ?? inst.props.color, 0xffffff) });
-    } catch (e) { warn(`${nameOf(inst)}: ${e.message}`); }
-  }
+const compositMesh = (n) => loadMesh(`rbxasset://avatar/compositing/${n}.mesh`);
+const raw = (c, d = 0xa3a2a5) => (c ? new THREE.Color().setRGB(c.r, c.g, c.b, THREE.LinearSRGBColorSpace) : new THREE.Color(d));
+// layers: [{ geometry, map?, color }] bottom to top, in atlas pixels (w x h); rendered at px times that size.
+function compositeAtlas(w, h, layers, px = 1) {
   compositor ??= new THREE.WebGLRenderer({ alpha: true, antialias: true, preserveDrawingBuffer: true });
   compositor.outputColorSpace = THREE.LinearSRGBColorSpace;
-  compositor.setSize(1024, 512, false);
+  compositor.setSize(w * px, h * px, false);
   compositor.setClearColor(0xffffff, 1);
   const scene = new THREE.Scene();
   layers.forEach(({ geometry, map, color }, i) => {
@@ -171,21 +168,93 @@ async function buildClassicAtlas(body, warn) {
     m.renderOrder = i;
     scene.add(m);
   });
-  compositor.render(scene, new THREE.OrthographicCamera(0, 1024, 0, 512, -1000, 1000));
-  const canvas = Object.assign(document.createElement('canvas'), { width: 1024, height: 512 });
+  compositor.render(scene, new THREE.OrthographicCamera(0, w, 0, h, -1000, 1000));
+  const canvas = Object.assign(document.createElement('canvas'), { width: w * px, height: h * px });
   canvas.getContext('2d').drawImage(compositor.domElement, 0, 0);
   for (const m of scene.children) { m.material.map?.dispose(); m.material.dispose(); } // geometries are the shared mesh cache
   const atlas = textureFrom(canvas);
   atlas.flipY = false; // atlas row 0 = UV v 0
   return atlas;
 }
+// The clothing ([inst, template url, composite mesh name]) covering a region, bottom to top.
+const clothingLayers = (body, region, names) => [
+  (region === 'torso' || region.endsWith('leg')) && [body.pants, body.pants?.props.pantstemplate, names.pants],
+  (region === 'torso' || region.endsWith('arm')) && [body.shirt, body.shirt?.props.shirttemplate, names.shirt],
+  region === 'torso' && [body.graphic, body.graphic?.props.graphic, names.tshirt],
+].filter((l) => l && l[1]);
+async function templateLayers(body, region, names, warn) {
+  const out = [];
+  for (const [inst, url, n] of clothingLayers(body, region, names)) {
+    const tshirt = inst === body.graphic && n !== 'CompositTShirt'; // R15 has no T-shirt layout: drawn on the torso front of the template
+    try { out.push({ geometry: await compositMesh(n), map: await (tshirt ? tshirtTemplate(url) : loadTexture(url, false)), color: raw(inst.props.color3 ?? inst.props.color, 0xffffff) }); }
+    catch (e) { warn(`${nameOf(inst)}: ${e.message}`); }
+  }
+  return out;
+}
+async function tshirtTemplate(url) {
+  const image = await loadImage(url), c = Object.assign(document.createElement('canvas'), { width: 585, height: 559 });
+  c.getContext('2d').drawImage(image, 231, 74, 128, 128);
+  return textureFrom(c, false);
+}
+// A texture over the whole atlas (R15 MeshPart TextureID): y down like the atlas, uv v = y / h reads the image
+// bottom-up, as the mesh UVs do.
+const quads = new Map();
+function atlasQuad(w, h) {
+  if (!quads.has(`${w}x${h}`)) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, w, 0, 0, w, h, 0, 0, 0, 0, w, h, 0, 0, h, 0], 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1], 2));
+    quads.set(`${w}x${h}`, g);
+  }
+  return quads.get(`${w}x${h}`);
+}
+
+const COMPOSITE = [['TorsoBase', 'torso'], ['LeftArmBase', 'leftarm'], ['RightArmBase', 'rightarm'], ['LeftLegBase', 'leftleg'], ['RightLegBase', 'rightleg']];
+const CLASSIC_NAMES = { pants: 'CompositPantsTemplate', shirt: 'CompositShirtTemplate', tshirt: 'CompositTShirt' };
+// cm: a CharacterMesh, whose base texture goes under the clothing and overlay over everything (Roblox's z order).
+async function buildClassicAtlas(body, cm, warn) {
+  const layers = [];
+  for (const [n, region] of COMPOSITE) layers.push({ geometry: await compositMesh('Composit' + n), color: raw(body.colors[region]) });
+  const texture = async (url, n) => {
+    if (!url) return;
+    try { layers.push({ geometry: await compositMesh(n), map: await loadTexture(url, false), color: new THREE.Color(0xffffff) }); }
+    catch (e) { warn(`${nameOf(cm)}: ${e.message}`); }
+  };
+  const p = cm?.props ?? {};
+  await texture(p.basetexturecontent || (p.basetextureid ? String(p.basetextureid) : null), 'CompositFullAtlasBaseTexture');
+  layers.push(...await templateLayers(body, 'torso', CLASSIC_NAMES, warn)); // the whole templates: torso covers every layer
+  await texture(p.overlaytexturecontent || (p.overlaytextureid ? String(p.overlaytextureid) : null), 'CompositFullAtlasOverlayTexture');
+  return compositeAtlas(1024, 512, layers);
+}
+
+// R15: one atlas per body region from the R15Composit*.mesh layouts (264x284 per limb, 388x264 for the torso).
+// Legs use the arm layouts with the pants template (the template puts legs where the shirt has arms). The part's
+// own TextureID (in atlas space) goes over the clothing, like an R6 package overlay.
+const R15_ATLAS = { torso: ['TorsoBase', 388, 264], leftarm: ['LeftArmBase', 264, 284], rightarm: ['RightArmBase', 264, 284], leftleg: ['LeftArmBase', 264, 284], rightleg: ['RightArmBase', 264, 284] };
+async function buildR15Atlas(body, region, color, textureUrl, warn) {
+  const [n, w, h] = R15_ATLAS[region], mesh = 'R15Composit' + n;
+  const layers = [{ geometry: atlasQuad(w, h), color: raw(color) }, ...await templateLayers(body, region, { pants: mesh, shirt: mesh, tshirt: mesh }, warn)];
+  if (textureUrl) {
+    try { layers.push({ geometry: atlasQuad(w, h), map: await loadTexture(textureUrl, false), color: new THREE.Color(0xffffff) }); }
+    catch (e) { warn(`${region}: ${e.message}`); }
+  }
+  return compositeAtlas(w, h, layers, 2);
+}
 
 export async function applyAppearance(mesh, a, warn) {
   if (!a) return;
+  const useAtlas = (atlas) => { mesh.material.map = atlas; mesh.material.color.set(0xffffff); mesh.material.needsUpdate = true; };
   if (a.classic && mesh.userData.classicUv) {
-    a.classic.atlas ??= buildClassicAtlas(a.classic, warn).catch((e) => { warn(`Classic R6 clothing: ${e.message}`); return null; });
-    const atlas = await a.classic.atlas;
-    if (atlas) { mesh.material.map = atlas; mesh.material.color.set(0xffffff); mesh.material.needsUpdate = true; return; }
+    const key = a.characterMesh ?? 'body';
+    if (!a.classic.atlases.has(key)) a.classic.atlases.set(key, buildClassicAtlas(a.classic, a.characterMesh, warn).catch((e) => { warn(`Classic R6 clothing: ${e.message}`); return null; }));
+    const atlas = await a.classic.atlases.get(key);
+    if (atlas) return useAtlas(atlas);
+  }
+  if (a.r15 && R15_ATLAS[a.region] && mesh.geometry.attributes.uv && clothingLayers(a.r15, a.region, {}).length) {
+    const key = `${a.region}|${a.color ? Object.values(a.color).join() : ''}|${a.texture ?? ''}`;
+    if (!a.r15.atlases.has(key)) a.r15.atlases.set(key, buildR15Atlas(a.r15, a.region, a.color, a.texture, warn).catch((e) => { warn(`R15 clothing: ${e.message}; using an approximation`); return null; }));
+    const atlas = await a.r15.atlases.get(key);
+    if (atlas) return useAtlas(atlas);
   }
   const clothing = await clothingAtlas(a, warn);
   let overlay = null;

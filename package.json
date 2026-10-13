@@ -1,12 +1,12 @@
 {
   "name": "roblox-icon-renderer",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "description": "Desktop icon renderer for Roblox .rbxm/.rbxmx/.obj files with post-processing and VFX",
   "main": "main.js",
   "type": "module",
   "scripts": {
     "start": "electron .",
-    "test": "node test/parsers.test.js && node test/anim.test.js && node test/scene.test.js && node test/mcp.test.js",
+    "test": "node test/parsers.test.js && node test/anim.test.js && node test/scene.test.js && node test/features.test.js && node test/mcp.test.js",
     "test:render": "electron test/render.cjs",
     "dist": "electron-builder --win",
     "pack": "electron-builder --dir",

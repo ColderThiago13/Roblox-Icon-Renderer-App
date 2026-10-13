@@ -410,7 +410,17 @@ async function buildPart(inst, ctx) {
   let mesh;
   const cm = appearance?.characterMesh?.props;
   const characterMeshUrl = cm?.meshcontent || (cm?.meshid ? String(cm.meshid) : null);
-  if (appearance?.classic) {
+  if (characterMeshUrl) {
+    // Package meshes are modeled around the limb's center at the standard limb size (a Korblox leg is a thin peg
+    // high on the hip), so they keep their own placement, scaled only if the limb was resized. Their UVs read the
+    // same composited atlas as the classic limbs.
+    try {
+      const geo = await loadMesh(characterMeshUrl), std = group.name === 'Torso' ? [2, 2, 1] : group.name === 'Head' ? [2, 1, 1] : [1, 2, 1];
+      mesh = new THREE.Mesh(geo, material);
+      mesh.scale.set(size.x / std[0], size.y / std[1], size.z / std[2]);
+      mesh.userData.classicUv = !!appearance?.classic;
+    } catch (e) { ctx.warn(`${group.name}: ${e.message}`); mesh = new THREE.Mesh(unitBox, material); mesh.scale.copy(size); }
+  } else if (appearance?.classic) {
     let geo;
     try { geo = await loadMesh(classicLimbUrl(group.name)); }
     catch (e) { ctx.warn(`Classic R6 body: ${e.message}; using an approximation`); geo = chamferedLimb(group.name); }
@@ -419,15 +429,6 @@ async function buildPart(inst, ctx) {
     mesh = new THREE.Mesh(geo, material);
     mesh.scale.set(size.x / ext.x, size.y / ext.y, size.z / ext.z);
     mesh.userData.classicUv = !geo.userData.approx;
-  } else if (characterMeshUrl) {
-    try {
-      const geo = await loadMesh(characterMeshUrl);
-      geo.computeBoundingBox();
-      const extent = geo.boundingBox.getSize(new THREE.Vector3()), center = geo.boundingBox.getCenter(new THREE.Vector3());
-      mesh = new THREE.Mesh(geo, material);
-      mesh.scale.set(size.x / (extent.x || 1), size.y / (extent.y || 1), size.z / (extent.z || 1));
-      mesh.position.copy(center.multiply(mesh.scale).negate());
-    } catch (e) { ctx.warn(`${group.name}: ${e.message}`); mesh = new THREE.Mesh(unitBox, material); mesh.scale.copy(size); }
   } else if (inst.className === 'MeshPart' && (inst.props.meshid || inst.props.meshcontent)) {
     const url = inst.props.meshid || inst.props.meshcontent;
     try {
@@ -471,10 +472,14 @@ async function buildPart(inst, ctx) {
     mesh.scale.copy(geoScale);
     mesh.position.copy(offset);
     if (p.textureid) {
-      // VertexColor is a Vector3 tint, not a Color3.
+      // VertexColor is a Vector3 tint, not a Color3. A character's head texture (dynamic heads worn as a mesh) is
+      // mostly transparent: the skin is the head's body color showing through.
       const vc = p.vertexcolor && { r: p.vertexcolor.x, g: p.vertexcolor.y, b: p.vertexcolor.z };
-      try { material.map = await loadTexture(p.textureid); material.color.copy(color3(vc, 0xffffff)); material.needsUpdate = true; }
-      catch (e) { ctx.warn(`${group.name}: ${e.message}`); }
+      try {
+        if (appearance?.region === 'head' && appearance.humanoid) { material.map = await loadOverlayTexture(p.textureid, col); material.color.set(0xffffff); }
+        else { material.map = await loadTexture(p.textureid); material.color.copy(color3(vc, 0xffffff)); }
+        material.needsUpdate = true;
+      } catch (e) { ctx.warn(`${group.name}: ${e.message}`); }
     }
   } else if (inst.className.endsWith('Operation')) {
     try {

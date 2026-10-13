@@ -8,6 +8,24 @@ import { buildVfx } from './vfx.js';
 import { buildTrails, attachmentSample } from './trails.js';
 import { samplePoints, boundsOf, LAYER } from '../render/renderer.js';
 import { buildRig, fileAnimations } from './anim.js';
+import { buildAvatarTree } from './avatar.js';
+import { compositeTree, fromB64 } from './composite.js';
+import { getAssetBytes } from './assets.js';
+
+// The instance tree of a file: a model file, an avatar recipe (.avatar) or a combined scene (.scene, see composite.js).
+async function sourceTree(name, bytes, warn) {
+  if (/\.avatar$/i.test(name)) return buildAvatarTree(JSON.parse(new TextDecoder().decode(bytes)), warn, getAssetBytes);
+  if (/\.scene$/i.test(name)) {
+    const scene = JSON.parse(new TextDecoder().decode(bytes)), members = [];
+    for (const m of scene.members) {
+      if (/\.obj$/i.test(m.name)) { warn(`${m.name}: OBJ files can't join a scene`); continue; }
+      try { members.push(renderTree(await sourceTree(m.name, fromB64(m.data), warn), m.path, m.disabled).roots); }
+      catch (e) { warn(`${m.name}: ${e.message}`); }
+    }
+    return compositeTree(members, scene.layout);
+  }
+  return parseModel(bytes);
+}
 
 // path / disabled: render only that instance of the file, without the disabled ones (see renderTree).
 export async function createJob(name, bytes, warn, path = null, disabled = []) {
@@ -23,8 +41,8 @@ export async function createJob(name, bytes, warn, path = null, disabled = []) {
     });
     job = { root, vfx: [], trails: [], lights: [], highlights: [], hlGroup: null, rig: null, animations: [] };
   } else {
-    const full = parseModel(bytes); // stays whole for the workspace panel
-    const tree = path || disabled.length ? renderTree(disabled.length ? parseModel(bytes) : full, path, disabled) : full;
+    const full = await sourceTree(name, bytes, warn); // stays whole for the workspace panel
+    const tree = path || disabled.length ? renderTree(disabled.length ? await sourceTree(name, bytes, warn) : full, path, disabled) : full;
     job = await buildScene(tree, warn);
     job.rig = buildRig(tree, job.partObjects, job.skinned);
     job.animations = job.rig ? fileAnimations(tree) : [];
