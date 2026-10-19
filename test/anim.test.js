@@ -39,4 +39,26 @@ assert.ok(Math.abs(ease(5, 2, 0.5) - 0.5) < 1e-9);
   assert.deepEqual(new THREE.Vector3().setFromMatrixPosition(sword.anim).toArray(), [3, 5, 0]);
 }
 
+
+// A Texture/Decal projected onto a skinned MeshPart follows the bones instead of staying at bind pose.
+{
+  const { projectedDecalGeometry } = await import('../src/scene/build.js');
+  const I = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  const part = { className: 'MeshPart', props: { name: 'Body', cframe: { p: [0, 0, 0], r: I } }, children: [] };
+  const bone = { className: 'Bone', props: { name: 'B', cframe: { p: [0, 0, 0], r: I } }, parent: part, children: [] };
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 1, 0, 0, 0, 1, 0], 3));
+  geo.computeVertexNormals();
+  geo.userData.skin = { names: ['B'], joints: new Uint16Array(12), weights: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]) };
+  const mesh = new THREE.Mesh(geo);
+  const decal = new THREE.Mesh(projectedDecalGeometry(mesh, { axis: 'z', sign: 1, rot: [0, 0, 0] }).geometry);
+  mesh.userData.decals = [decal];
+  const rig = buildRig({ all: [part, bone] }, new Map(), [{ part, mesh }]);
+  const ys = () => [...decal.geometry.attributes.position.array].filter((_, i) => i % 3 === 1);
+  assert.deepEqual(ys(), [0, 0, 1]);
+  rig.apply({ name: 'b', length: 1, loop: true, curves: new Map([['B', [key(0, 0), key(1, 0)].map((k) => ({ ...k, pos: new THREE.Vector3(0, 5, 0) }))]]) }, 0);
+  assert.deepEqual(ys(), [5, 5, 6], 'decal moved with the bone');
+  rig.apply(null, 0);
+  assert.deepEqual(ys(), [0, 0, 1], 'back to rest');
+}
 console.log('anim ok');

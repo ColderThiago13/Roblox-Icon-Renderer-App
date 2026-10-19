@@ -134,17 +134,6 @@ const STUDIO_PORT = +process.env.RIR_PORT || 47823; // ponytail: fixed port shar
 const PLUGIN_SRC = path.join(ROOT, 'src', 'studio', 'plugin.lua');
 const PLUGIN_DST = () => path.join(process.env.LOCALAPPDATA || '', 'Roblox', 'Plugins', 'RobloxIconRenderer.lua');
 const pluginVersion = (text) => +(String(text).match(/rir-plugin-version:\s*(\d+)/)?.[1] ?? 0);
-// Toolbar icons must be rbxasset:// paths, so the icon goes into each Studio install's content folder
-// (again after a Studio update, on the next app launch).
-async function copyPluginIcon() {
-  const root = path.join(process.env.LOCALAPPDATA || '', 'Roblox', 'Versions');
-  for (const d of await fs.readdir(root).catch(() => [])) {
-    const dir = path.join(root, d), icon = path.join(dir, 'content', 'textures', 'RobloxIconRenderer', 'icon.png');
-    if (!fsSync.existsSync(path.join(dir, 'RobloxStudioBeta.exe')) || fsSync.existsSync(icon)) continue;
-    await fs.mkdir(path.dirname(icon), { recursive: true });
-    await fs.writeFile(icon, nativeImage.createFromPath(path.join(ROOT, 'build', 'icon.png')).resize({ width: 64, height: 64 }).toPNG());
-  }
-}
 async function pluginStatus() {
   const bundled = pluginVersion(await fs.readFile(PLUGIN_SRC, 'utf8'));
   const text = await fs.readFile(PLUGIN_DST(), 'utf8').catch(() => null);
@@ -154,7 +143,6 @@ ipcMain.handle('plugin:status', pluginStatus);
 ipcMain.handle('plugin:install', async () => {
   await fs.mkdir(path.dirname(PLUGIN_DST()), { recursive: true });
   await fs.copyFile(PLUGIN_SRC, PLUGIN_DST());
-  await copyPluginIcon().catch(() => {});
   return pluginStatus();
 });
 ipcMain.handle('plugin:open', async () => { await fs.mkdir(path.dirname(PLUGIN_DST()), { recursive: true }); shell.openPath(path.dirname(PLUGIN_DST())); });
@@ -586,7 +574,6 @@ app.whenReady().then(async () => {
   setupUpdates(win);
   if (!process.env.RIR_TEST_FILES) { discordConnect(); setInterval(discordConnect, 15000); }
   if (!process.env.RIR_TEST_FILES || process.env.RIR_TEST_STUDIO) startLocalServer();
-  if ((await pluginStatus().catch(() => null))?.installed) copyPluginIcon().catch(() => {}); // Studio updated since
   if (process.env.RIR_DEVTOOLS) win.webContents.openDevTools({ mode: 'detach' });
   if (process.env.RIR_TEST_FILES) win.webContents.once('did-finish-load', () => renderTest(win));
 });

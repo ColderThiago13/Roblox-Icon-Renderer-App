@@ -341,8 +341,7 @@ const FACES = [
 // spanning the mesh bounds (so a face decal lands on a round head, not on the hidden part box).
 export function projectedDecalGeometry(mesh, f) {
   mesh.updateMatrix();
-  const src = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry;
-  const pos = src.attributes.position, n = new THREE.Vector3();
+  const idx = mesh.geometry.index, pos = mesh.geometry.attributes.position, n = new THREE.Vector3();
   n[f.axis] = f.sign;
   const rot = new THREE.Quaternion().setFromEuler(new THREE.Euler(...f.rot));
   const uDir = new THREE.Vector3(1, 0, 0).applyQuaternion(rot), vDir = new THREE.Vector3(0, 1, 0).applyQuaternion(rot);
@@ -350,16 +349,18 @@ export function projectedDecalGeometry(mesh, f) {
   for (let i = 0; i < pos.count; i++) pts.push(new THREE.Vector3().fromBufferAttribute(pos, i).applyMatrix4(mesh.matrix));
   const span = (dir) => { let lo = Infinity, hi = -Infinity; for (const p of pts) { const d = p.dot(dir); lo = Math.min(lo, d); hi = Math.max(hi, d); } return [lo, hi - lo || 1]; };
   const [u0, uw] = span(uDir), [v0, vh] = span(vDir);
-  const out = [], uv = [], e1 = new THREE.Vector3(), e2 = new THREE.Vector3();
-  for (let i = 0; i + 2 < pts.length; i += 3) {
-    const [a, b, c] = [pts[i], pts[i + 1], pts[i + 2]];
+  const out = [], uv = [], src = [], e1 = new THREE.Vector3(), e2 = new THREE.Vector3();
+  const count = idx ? idx.count : pos.count, at = (k) => (idx ? idx.getX(k) : k);
+  for (let k = 0; k + 2 < count; k += 3) {
+    const tri = [at(k), at(k + 1), at(k + 2)], [a, b, c] = tri.map((i) => pts[i]);
     if (e1.subVectors(b, a).cross(e2.subVectors(c, a)).normalize().dot(n) <= 0.05) continue;
-    for (const p of [a, b, c]) { out.push(p.x, p.y, p.z); uv.push((p.dot(uDir) - u0) / uw, (p.dot(vDir) - v0) / vh); }
+    for (const i of tri) { const p = pts[i]; out.push(p.x, p.y, p.z); uv.push((p.dot(uDir) - u0) / uw, (p.dot(vDir) - v0) / vh); src.push(i); }
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(out, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   g.computeVertexNormals();
+  g.userData.src = Uint32Array.from(src); // mesh vertex under each decal vertex, so skinning can carry the decal along
   return { geometry: g, w: uw, h: vh };
 }
 
@@ -519,7 +520,9 @@ async function buildPart(inst, ctx) {
 
   for (const dec of kids.filter((c) => c.className === 'Decal' || c.className === 'Texture')) {
     const plane = await buildDecal(dec, size, ctx.warn, mesh);
-    if (plane) group.add(plane);
+    if (!plane) continue;
+    group.add(plane);
+    if (plane.geometry.userData.src) (mesh.userData.decals ??= []).push(plane);
   }
   // After the decals: they project onto the shared unit box, which these swap for a tiled-UV copy.
   if (!material.map && !sa && !special && !appearance) {

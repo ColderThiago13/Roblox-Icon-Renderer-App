@@ -202,8 +202,23 @@ function prepareSkins(bones, skinned) {
   return out;
 }
 
+// Decals/Textures projected onto a skinned mesh ride its vertices (Roblox projects them at bind pose).
+function followDecals(mesh) {
+  if (!mesh.userData.decals) return;
+  mesh.updateMatrix();
+  const mp = mesh.geometry.attributes.position, v = new THREE.Vector3();
+  for (const d of mesh.userData.decals) {
+    const src = d.geometry.userData.src, pos = d.geometry.attributes.position;
+    for (let i = 0; i < src.length; i++) { v.fromBufferAttribute(mp, src[i]).applyMatrix4(mesh.matrix); pos.setXYZ(i, v.x, v.y, v.z); }
+    pos.needsUpdate = true;
+    d.geometry.computeVertexNormals();
+    d.geometry.computeBoundingSphere();
+    d.frustumCulled = false;
+  }
+}
+
 function deform(sk, posed) {
-  if (!posed) { sk.mesh.geometry = sk.restGeo; return; }
+  if (!posed) { sk.mesh.geometry = sk.restGeo; followDecals(sk.mesh); return; }
   if (!sk.work) sk.work = sk.restGeo.clone();
   sk.mesh.geometry = sk.work;
   const M = sk.meshBones.map((b, i) => (b ? worldMatrix(b).multiply(sk.restInv[i]).elements : null));
@@ -239,4 +254,5 @@ function deform(sk, posed) {
   sk.work.attributes.position.needsUpdate = true;
   if (nor) sk.work.attributes.normal.needsUpdate = true;
   sk.work.computeBoundingSphere();
+  followDecals(sk.mesh);
 }

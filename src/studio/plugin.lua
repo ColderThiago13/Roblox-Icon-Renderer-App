@@ -2,7 +2,7 @@
 -- Installed and updated by the Roblox Icon Renderer app (toolbar or Settings > Roblox Studio); edits here are overwritten.
 -- "Send to Renderer": each selected instance is sent as its own file, so several selected models become separate renders.
 -- "Agent Link": lets AI agents connected to the app (MCP) browse Studio, read the selection and import models.
--- rir-plugin-version: 2
+-- rir-plugin-version: 3
 
 local HttpService = game:GetService("HttpService")
 local Selection = game:GetService("Selection")
@@ -12,7 +12,7 @@ local RunService = game:GetService("RunService")
 
 local BASE = "http://127.0.0.1:47823"
 local HEADERS = { ["X-RIR"] = "1" }
-local ICON = "rbxasset://textures/RobloxIconRenderer/icon.png"
+local ICON = "rbxassetid://104031595201484" -- image behind decal 70680149320482
 
 local toolbar = plugin:CreateToolbar("Roblox Icon Renderer")
 local sendButton = toolbar:CreateButton(
