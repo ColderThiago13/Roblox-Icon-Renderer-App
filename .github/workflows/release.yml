@@ -1,0 +1,63 @@
+name: Release
+
+# Builds the Windows installer and the Linux AppImage, then publishes both (with the auto-update files latest.yml and
+# latest-linux.yml) to the GitHub release v<package.json version>. Start it from any OS:
+#   npm run release   (pushes the tag v<version>), or Actions > Release > Run workflow on a branch.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: --win
+          - os: ubuntu-latest
+            target: --linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npx electron-builder ${{ matrix.target }} --publish never
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.os }}
+          path: |
+            dist/Roblox-Icon-Renderer-Setup.exe
+            dist/Roblox-Icon-Renderer-Setup.exe.blockmap
+            dist/Roblox-Icon-Renderer.AppImage
+            dist/latest*.yml
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Upload to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="v$version"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"; exit 1
+          fi
+          ls -l dist
+          gh release view "$tag" > /dev/null 2>&1 || gh release create "$tag" --title "$version" --target "$GITHUB_SHA" --notes ""
+          gh release upload "$tag" dist/* --clobber

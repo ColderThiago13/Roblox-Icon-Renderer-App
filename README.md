@@ -1,14 +1,16 @@
 # Roblox Icon Renderer
 
-A Windows app that turns Roblox `.rbxm` / `.rbxmx` models (and `.obj`) into icons, with post-processing effects, Roblox VFX, rig animations and batch export.
+A Windows and Linux app that turns Roblox `.rbxm` / `.rbxmx` models (and `.obj`) into icons, with post-processing effects, Roblox VFX, rig animations and batch export.
 
 ## ⬇ Download
 
-**[Download the installer (Windows)](https://github.com/ColderThiago13/Roblox-Icon-Renderer-App/releases/latest/download/Roblox-Icon-Renderer-Setup.exe)** · [All releases](https://github.com/ColderThiago13/Roblox-Icon-Renderer-App/releases)
+**[Download the installer (Windows)](https://github.com/ColderThiago13/Roblox-Icon-Renderer-App/releases/latest/download/Roblox-Icon-Renderer-Setup.exe)** · **[Download the AppImage (Linux)](https://github.com/ColderThiago13/Roblox-Icon-Renderer-App/releases/latest/download/Roblox-Icon-Renderer.AppImage)** · [All releases](https://github.com/ColderThiago13/Roblox-Icon-Renderer-App/releases)
 
 The link always points to the newest version, so it's the only installer you need. Once installed, the app checks GitHub on launch and shows an **Update** button in the toolbar when a newer version is out: one click downloads it, a second restarts into the new version. Your settings, profiles and Roblox API key are kept.
 
 Installs per user (no admin needed) with Desktop and Start Menu shortcuts. Windows SmartScreen may warn because the installer isn't code-signed: choose *More info → Run anyway*. Uninstall from Windows Settings → Apps.
+
+**Linux** (x86-64; Arch/CachyOS, Fedora, Ubuntu, Debian and most other distros): make the AppImage executable and run it, e.g. `chmod +x Roblox-Icon-Renderer.AppImage && ./Roblox-Icon-Renderer.AppImage`. It needs FUSE 2 (`sudo pacman -S fuse2` on Arch/CachyOS, `sudo apt install libfuse2t64` on Ubuntu 24.04+). Updates replace the AppImage in place. For a menu entry, use [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) or AppImageLauncher. Roblox Studio integration (plugin, `rbxasset://` content, Studio fonts) uses [Vinegar](https://vinegarhq.org).
 
 ![The app: a hoverboard with its trails and VFX in the preview](docs/app.png)
 
@@ -24,7 +26,7 @@ Installs per user (no admin needed) with Desktop and Start Menu shortcuts. Windo
 
 ## Quick start
 
-1. Install the Windows app using the download link above.
+1. Install the app using a download link above.
 2. Drop a `.rbxm`, `.rbxmx` or `.obj` file into the window, add a catalog item with **ID**, or send your selection from Roblox Studio (see below). Set up **Roblox access…** if its meshes or textures need downloading.
 3. Drag to rotate, right-drag to move, and scroll to zoom. Hold **Ctrl** while scrolling for fine zoom adjustments, down to **0.01×**.
 4. Adjust the look in the settings panel, then choose **Export current…**. Check multiple files to export a batch.
@@ -36,7 +38,7 @@ Files only *reference* meshes and textures (`rbxassetid://…`). Since April 202
 - **Open Cloud API key** (preferred): Creator Dashboard → API Keys, with the scope `legacy-asset:manage`. Downloads go through `apis.roblox.com/asset-delivery-api/v1/assetId/{id}`.
 - **.ROBLOSECURITY cookie** (fallback): used with `assetdelivery.roblox.com/v1/asset/?id=`. It grants full account access, so use an alt account.
 
-Credentials are encrypted with the OS keychain (`safeStorage`) and only sent to roblox.com. Everything (credentials, settings, `asset-cache`) lives in `%APPDATA%\roblox-icon-renderer`, which updates and reinstalls keep. You can also put a file named after the asset ID into the asset cache folder to use it offline.
+Credentials are encrypted with the OS keychain (`safeStorage`) and only sent to roblox.com. Everything (credentials, settings, `asset-cache`) lives in `%APPDATA%\roblox-icon-renderer` (Linux: `~/.config/roblox-icon-renderer`), which updates and reinstalls keep. You can also put a file named after the asset ID into the asset cache folder to use it offline.
 
 If an asset can't be downloaded, the app still renders: missing meshes show as their bounding box, and every problem is listed under the preview.
 
@@ -48,7 +50,7 @@ If an asset can't be downloaded, the app still renders: missing meshes show as t
 
 ## Roblox Studio plugin
 
-The toolbar shows **Install plugin** until the plugin is installed, and **Update plugin** when a newer app version ships changes to it (also under Settings → Roblox Studio). It writes `RobloxIconRenderer.lua` to `%LOCALAPPDATA%\Roblox\Plugins`; restart Studio if it was open.
+The toolbar shows **Install plugin** until the plugin is installed, and **Update plugin** when a newer app version ships changes to it (also under Settings → Roblox Studio). It writes `RobloxIconRenderer.lua` to `%LOCALAPPDATA%\Roblox\Plugins`; restart Studio if it was open. On Linux it goes into [Vinegar](https://vinegarhq.org)'s Wine prefix (Flatpak or native): `~/.var/app/org.vinegarhq.Vinegar/data/vinegar/appdata/Roblox/Plugins` on current Vinegar versions, or `drive_c/users/<you>/AppData/Local/Roblox/Plugins` in older prefixes.
 
 In Studio, select one or more models, parts or effects and click **Plugins → Send to Renderer**. Each selected item arrives as its **own render**. Sending the same item again replaces that render's model and keeps its settings, so you can tweak in Studio and re-send. Studio asks once to allow the plugin to reach `127.0.0.1` (the app listens only on this computer, port 47823).
 
@@ -65,6 +67,8 @@ Manual setup, if you prefer (paths from a default install):
 ```sh
 claude mcp add --scope user roblox-icon-renderer -e ELECTRON_RUN_AS_NODE=1 -- "%LOCALAPPDATA%\Programs\Roblox Icon Renderer\Roblox Icon Renderer.exe" "%LOCALAPPDATA%\Programs\Roblox Icon Renderer\resources\app\src\mcp\server.mjs"
 ```
+
+On Linux the AppImage writes the same setup with the `.AppImage` file as the executable and a small launcher, `~/.config/roblox-icon-renderer/mcp-server.mjs`, as the script; connect again if you move the AppImage. The agent connection needs unprivileged user namespaces, which most distros have (Ubuntu 23.10+ restricts them through AppArmor, and there it fails with `bad option: --no-sandbox`).
 
 Then just ask, e.g. *"Import my selected models from Studio, make a 512 px icon of each with a 3/4 view, a thick black outline and a dark blue gradient background, check them, and export them to D:\Icons"*.
 
@@ -175,6 +179,10 @@ Everything stays on this computer: the app's API listens only on `127.0.0.1` and
 - Highlight `DepthMode = Occluded` is drawn as AlwaysOnTop.
 - Avatars: layered clothing, Rthro proportion / body-type blending and dynamic head moods (facial expressions) aren't reproduced.
 - Ambient occlusion, edge lines and rim glow use the model only (VFX in front of the model still get its occlusion), and the reflection floor isn't included in the camera framing.
+
+## Releasing
+
+Bump `version` in `package.json`, commit, push, then run `npm run release` (on Windows or Linux). It pushes the tag `v<version>`, and the [Release workflow](.github/workflows/release.yml) builds the Windows installer and the Linux AppImage and uploads both, with their auto-update files, to that GitHub release. Actions → Release → *Run workflow* does the same without a local tag. Local builds: `npm run dist` (this OS), `npm run dist:win`, `npm run dist:linux`.
 
 ## References
 
