@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, protocol, net, safeStorage, shell,
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import os from 'node:os';
 import { createConnection } from 'node:net';
 import http from 'node:http';
 import { exec } from 'node:child_process';
@@ -79,14 +80,31 @@ ipcMain.handle('asset:get', async (_e, id) => {
   return inflight.get(id);
 });
 
+// On Linux, Roblox Studio runs under Wine through Vinegar: its Flatpak, or a native build in ~/.local/share/vinegar.
+const vinegarDirs = () => [path.join(app.getPath('home'), '.var', 'app', 'org.vinegarhq.Vinegar', 'data', 'vinegar'),
+  path.join(process.env.XDG_DATA_HOME || path.join(app.getPath('home'), '.local', 'share'), 'vinegar')].filter((d) => fsSync.existsSync(d));
+// Studio's %LOCALAPPDATA% (plugins live in it). Vinegar sets it in the Wine prefix registry: new prefixes point it at
+// <vinegar>/appdata (also used before Studio's first run creates the prefix), older ones keep drive_c/users/<user>.
+function localAppData() {
+  if (process.platform === 'win32') return process.env.LOCALAPPDATA || null;
+  const dir = vinegarDirs()[0];
+  if (!dir) return null;
+  const pfx = path.join(dir, 'prefixes', 'studio');
+  let reg;
+  try { reg = fsSync.readFileSync(path.join(pfx, 'user.reg'), 'utf8'); } catch { return path.join(dir, 'appdata'); }
+  const z = reg.match(/^"Local AppData"="Z:(.+)"$/m)?.[1]; // Z:\\home\\… is the Linux root
+  return z ? z.replaceAll('\\\\', '/') : path.join(pfx, 'drive_c', 'users', os.userInfo().username, 'AppData', 'Local');
+}
+
 // rbxasset:// files (classic body meshes, the default face, …) ship with Roblox, not the asset API,
 // so read them from the newest local Roblox Studio/Player install. Read-only, confined to its content folder.
 let robloxContent = null; // one shared lookup, however many requests arrive at once
 function robloxContentDir() {
   robloxContent ??= (async () => {
     const local = process.env.LOCALAPPDATA || '';
-    const roots = [path.join(local, 'Roblox', 'Versions'), path.join(process.env['ProgramFiles(x86)'] || '', 'Roblox', 'Versions'),
-      ...['Bloxstrap', 'Fishstrap', 'Voidstrap'].map((b) => path.join(local, b, 'Versions'))]; // bootstrapper-only installs
+    const roots = process.platform !== 'win32' ? vinegarDirs().map((d) => path.join(d, 'versions')) // Vinegar's Studio installs
+      : [path.join(local, 'Roblox', 'Versions'), path.join(process.env['ProgramFiles(x86)'] || '', 'Roblox', 'Versions'),
+        ...['Bloxstrap', 'Fishstrap', 'Voidstrap'].map((b) => path.join(local, b, 'Versions'))]; // bootstrapper-only installs
     let best = null;
     for (const root of roots) {
       for (const d of await fs.readdir(root).catch(() => [])) {
@@ -132,7 +150,11 @@ ipcMain.handle('asset:name', async (_e, id) => {
 // selection to this localhost server, one file per selected instance.
 const STUDIO_PORT = +process.env.RIR_PORT || 47823; // ponytail: fixed port shared with plugin.lua and src/mcp/server.mjs; make it configurable if it ever collides
 const PLUGIN_SRC = path.join(ROOT, 'src', 'studio', 'plugin.lua');
-const PLUGIN_DST = () => path.join(process.env.LOCALAPPDATA || '', 'Roblox', 'Plugins', 'RobloxIconRenderer.lua');
+const PLUGIN_DST = () => {
+  const local = localAppData();
+  if (!local) throw new Error(process.platform === 'win32' ? 'LOCALAPPDATA is not set' : 'Roblox Studio was not found: install it with Vinegar (vinegarhq.org) and open it once');
+  return path.join(local, 'Roblox', 'Plugins', 'RobloxIconRenderer.lua');
+};
 const pluginVersion = (text) => +(String(text).match(/rir-plugin-version:\s*(\d+)/)?.[1] ?? 0);
 async function pluginStatus() {
   const bundled = pluginVersion(await fs.readFile(PLUGIN_SRC, 'utf8'));
@@ -340,7 +362,15 @@ ipcMain.handle('watch:stop', () => { watcher?.close(); watcher = null; });
 // Agents launch src/mcp/server.mjs with this app's own executable as Node (ELECTRON_RUN_AS_NODE), so nothing else
 // needs installing. One click writes that into Claude Code, Codex or Claude Desktop.
 const MCP_NAME = 'roblox-icon-renderer';
-const mcpCommand = () => ({ command: process.execPath, args: [path.join(ROOT, 'src', 'mcp', 'server.mjs')], env: { ELECTRON_RUN_AS_NODE: '1' } });
+// The AppImage runs from a mount that moves every launch, so agents start the .AppImage itself with a stub in userData
+// that loads this run's server (written on startup, see writeMcpStub).
+const MCP_STUB = () => path.join(app.getPath('userData'), 'mcp-server.mjs');
+const mcpCommand = () => ({ command: process.env.APPIMAGE || process.execPath, args: [process.env.APPIMAGE ? MCP_STUB() : path.join(ROOT, 'src', 'mcp', 'server.mjs')], env: { ELECTRON_RUN_AS_NODE: '1' } });
+const writeMcpStub = () => writeAtomic(MCP_STUB(), `// Written by Roblox Icon Renderer: starts the MCP server from the AppImage's current mount.
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+await import(pathToFileURL(path.join(path.dirname(process.execPath), 'resources', 'app', 'src', 'mcp', 'server.mjs')).href);
+`);
 const CODEX_CONFIG = () => path.join(process.env.CODEX_HOME || path.join(app.getPath('home'), '.codex'), 'config.toml');
 const DESKTOP_CONFIG = () => path.join(app.getPath('appData'), 'Claude', 'claude_desktop_config.json');
 const readText = (f) => fs.readFile(f, 'utf8').catch(() => null);
@@ -496,7 +526,12 @@ let discord = null, activity = null, activityTimer = null;
 const discordStart = Date.now();
 function discordConnect() {
   if (!DISCORD_CLIENT_ID || discord || prefs.discordActivity === false) return;
-  const sock = createConnection(String.raw`\\?\pipe\discord-ipc-0`);
+  // Linux: native, Flatpak, Vesktop Flatpak and Snap Discord each put the socket in a different runtime folder.
+  const pipe = process.platform === 'win32' ? String.raw`\\?\pipe\discord-ipc-0`
+    : ['', 'app/com.discordapp.Discord', '.flatpak/dev.vencord.Vesktop/xdg-run', 'snap.discord']
+      .map((d) => path.join(process.env.XDG_RUNTIME_DIR || os.tmpdir(), d, 'discord-ipc-0')).find((f) => fsSync.existsSync(f));
+  if (!pipe) return;
+  const sock = createConnection(pipe);
   const send = (op, data) => {
     const body = Buffer.from(JSON.stringify(data)), head = Buffer.alloc(8);
     head.writeInt32LE(op, 0); head.writeInt32LE(body.length, 4);
@@ -572,6 +607,7 @@ app.whenReady().then(async () => {
   tray.on('click', showWindow);
   tray.setContextMenu(Menu.buildFromTemplate([{ label: 'Show Roblox Icon Renderer', click: showWindow }, { type: 'separator' }, { label: 'Quit', click: () => app.quit() }]));
   setupUpdates(win);
+  if (process.env.APPIMAGE) writeMcpStub().catch(() => {});
   if (!process.env.RIR_TEST_FILES) { discordConnect(); setInterval(discordConnect, 15000); }
   if (!process.env.RIR_TEST_FILES || process.env.RIR_TEST_STUDIO) startLocalServer();
   if (process.env.RIR_DEVTOOLS) win.webContents.openDevTools({ mode: 'detach' });

@@ -3,14 +3,17 @@
   "version": "0.9.1",
   "description": "Desktop icon renderer for Roblox .rbxm/.rbxmx/.obj files with post-processing and VFX",
   "main": "main.js",
+  "desktopName": "roblox-icon-renderer.desktop",
   "type": "module",
   "scripts": {
     "start": "electron .",
     "test": "node test/parsers.test.js && node test/anim.test.js && node test/scene.test.js && node test/features.test.js && node test/mcp.test.js",
     "test:render": "electron test/render.cjs",
-    "dist": "electron-builder --win",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux",
     "pack": "electron-builder --dir",
-    "release": "electron-builder --win --publish always"
+    "release": "node -e \"const v='v'+require('./package.json').version;require('child_process').execSync('git tag '+v+' && git push origin '+v,{stdio:'inherit'})\""
   },
   "build": {
     "appId": "com.roblox-icon-renderer.app",
@@ -41,6 +44,12 @@
     ],
     "win": {
       "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Graphics",
+      "syncDesktopName": true,
+      "artifactName": "Roblox-Icon-Renderer.${ext}"
     },
     "icon": "build/icon.png",
     "nsis": {

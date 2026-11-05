@@ -86,7 +86,8 @@ function launchApp() {
     const env = { ...process.env };
     delete env.ELECTRON_RUN_AS_NODE;
     const packaged = !/^electron(\.exe)?$/i.test(path.basename(process.execPath));
-    spawn(process.execPath, packaged ? [] : [ROOT], { detached: true, stdio: 'ignore', env }).unref();
+    // AppImage: launch the .AppImage, not this run's mount, which goes away when this server exits.
+    spawn(env.APPIMAGE || process.execPath, packaged ? [] : [ROOT], { detached: true, stdio: 'ignore', env }).unref();
     for (let i = 0; i < 120; i++) {
       await new Promise((r) => setTimeout(r, 500));
       try { if ((await post({ method: 'status' })).ok) return; } catch { /* still starting */ }
